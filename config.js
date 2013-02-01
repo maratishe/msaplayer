@@ -1,9 +1,9 @@
 // setup jquery environment
 $.io = {};
 $.io.aname = 'myplayer'; // name of this application
-$.io.burl = 'http://133.9.67.162/myplayer'; // base URL of this application
-$.io.bip = '133.9.67.162'; // base URL of this application 
-$.io.aburl = 'http://133.9.67.162/ajaxkit'; // base URL of ajaxkit
+$.io.bip = 'your.server.IP'; // base URL of this application 
+$.io.burl = 'httsp://' + $.io.bip + '/myplayer'; // base URL of this application
+$.io.aburl = 'http://' + $.io.bip + '/ajaxkit'; // base URL of ajaxkit
 $.io.rand = 10;	// for refreshing content
 // obscene,crazy,bigass,jumbo,huger,huge,larger,large,big,normal,tiny,puny
 $.io.font = { 
