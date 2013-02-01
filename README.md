@@ -1,4 +1,1 @@
-msaplayer
-=========
-
-msaplayer : MultiSource Aggregation Player.  This is a test code for multisource content aggregation using websockets, and webworkers. 
+The specific application for this code is multistream video aggregation and playback. It requires the latest Media Source API which (at present) is available only in one of recent Chrome releases (rar of the portable version is attached). 
