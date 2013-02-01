@@ -1,0 +1,89 @@
+<html>
+<title>myplayer</title>
+<head>
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF8">
+<script src="libs.js"></script>
+<!--[if IE]><script type="text/javascript" src="http://133.9.67.162/ajaxkit/jq/jquery.excanvas.js"></script><![endif]-->
+<script src="config.js"></script>
+<!--[if IE]><script type="text/javascript" src="excanvas.js"></script><![endif]-->
+</head>
+<body style="overflow:hidden;">
+<div id="info"></div>
+<div id="error"></div>
+<video id="v" width="640" height="360" autoplay></video>
+</body>
+<script>
+
+// assumes that the environment has already been set
+//$.ioutils.nolog = true
+//$.ioutils.jsonsession = true;
+//$.io.atoms = {};
+
+// setup
+var L; var SETUP; var IP = $.io.bip;
+L = [ 1, 2, 3, 5, 7, 10]; $.mathShuffle( L); var STREAMS = L[ 0]; 
+L = [ 500, 1000, 2000, 3000, 5000, 10000, 20000, 50000, 100000]; $.mathShuffle( L); var CHUNKSIZE = L[ 0];
+L = $.ttl( 'pull,push,push.worker'); $.mathShuffle( L); var METHOD = L[ 0];
+L = $.ttl( 'worker.pass.by.copy,worker.pass.by.ref'); $.mathShuffle( L); var WORKER = L[ 0];
+L = $.ttl( '1,2,3,5,10,20,50,100'); $.mathShuffle( L); var THRU = L[ 0];
+var LASTPOS = 2015000;
+SETUP = { streams: STREAMS, chunksize: CHUNKSIZE, method: METHOD, worker: WORKER, thru: THRU, lastpos: LASTPOS};
+// working parameters
+var TIMESTAMP = null; var LASTIME = null; var TIMEGAPS = [];	// [ time gap, time gap, ...]
+var SOURCES = [];
+var BUFFER = {}; var BUFFERPOS = 0;
+var video = document.getElementById( 'v');
+var ms; var buffer; var $BOX; var $STATUS; var $STATUS2;
+function again() { window.location = $.rurl( $.io.burl, 20); }
+function results() { var took = $.iotime( TIMESTAMP); $.jsonload( 'actions.php', { action: 'stats', took: took, setup: $.h2json( SETUP, true), timegaps: $.h2json( TIMEGAPS, true)}, function( json) { $( 'body').stopTime().oneTime( '10s', function() { again(); })})}
+function countdown( count) { $BOX.stopTime().oneTime( '1s', function() { 
+	if ( count <= 0) return results();
+	$STATUS2.empty().append( '' + count);
+	countdown( count - 1);
+})}
+$( document).ready( function() { $.jsonload( 'actions.php', { action: 'websocketserver'}, function( json) {
+	$BOX = $( 'body').ioover().css({ left: '-10px', width: '5px'})
+	$STATUS = $( 'body').ioover({ position: 'absolute', bottom: '3px', right: '3px', 'font-size': $.io.defs.fonts.big})
+	$STATUS2 = $( 'body').ioover({ position: 'absolute', bottom: '25px', right: '3px', 'font-size': $.io.defs.fonts.normal})
+	countdown( 100);
+	$( 'div[id="info"]').empty().append( $.htt( SETUP)).css({ 'font-size': $.io.defs.fonts.big})
+	window.MediaSource = window.MediaSource || window.WebKitMediaSource;
+	ms = new MediaSource();
+	var channel = function( pos) { 
+		//POSES[ pos] = 0;
+		var worker = new Worker( './test.webworker.passbyref.worker.js');
+		worker.onmessage = function( e) { 
+			if ( e.data == 'done') { console.log( 'closed'); return; }
+			BUFFER[ '' + pos] = new Uint8Array( e.data);
+			pos += STREAMS * CHUNKSIZE;
+		}
+		worker.postMessage( { CHUNKSIZE: CHUNKSIZE, STREAMS: STREAMS, pos: pos, LASTPOS: LASTPOS});
+		pos *= CHUNKSIZE;
+	}
+	ms.addEventListener( 'webkitsourceopen', function( e) {
+		TIMESTAMP = $.iotime(); LASTIME = $.iotime(); 
+		var ms = e.target; var pos = 0; var size = CHUNKSIZE;
+		buffer = ms.addSourceBuffer( 'video/webm; codecs="vorbis,vp8"');
+		$.jsload( METHOD + '.js'); 
+	})
+	ms.addEventListener( 'webkitsourceended', function( e) { results();})
+	var video = document.querySelector( 'video');
+	video.src = window.URL.createObjectURL( ms);
+	var play = function() { $( 'body').stopTime().oneTime( '100ms', function() { 
+		while ( 1) { 
+			//console.log( 'check', BUFFERPOS, BUFFER[ '' + BUFFERPOS] ? BUFFER[ '' + BUFFERPOS].length : '?');
+			if ( ! BUFFER[ '' + BUFFERPOS] || ! BUFFER[ '' + BUFFERPOS].length) break;
+			buffer.append( BUFFER[ '' + BUFFERPOS]);
+			//delete BUFFER[ '' + BUFFERPOS];
+			var now = $.iotime(); TIMEGAPS.push( now - LASTIME); LASTIME = now;
+			//console.log( 'play', BUFFERPOS);
+			$STATUS.empty().append( BUFFERPOS);
+			BUFFERPOS += CHUNKSIZE;
+			if ( BUFFERPOS >= LASTPOS) { ms.endOfStream(); return; }
+		}
+		eval( play)();
+	})}
+	eval( play)();
+})})
+</script>
+</html>
