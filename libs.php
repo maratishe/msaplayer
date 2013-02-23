@@ -1,4 +1,51 @@
 <?php
+
+
+mb_internal_encoding( "UTF-8");
+// search and index
+$LUCENEDIR = '/ntfs/lucene'; 
+$LUCENECODEDIR = '/code/lucene2';
+$CONTENTDIR = '/ntfs/content';
+// perform aslock() for each file (for now, only JSON)
+$ASLOCKON = false;	// locks files before all file operations
+$IOSTATSON = false; // when true, will collect statistics about file file write/reads (with locks)
+// collect IO stats globally (can be used by a logger) (only JSON implements it for now)
+$IOSTATS = array();  // stats is in [ {type,time,[size]}, ...] 
+// file locks
+$ASLOCKS = array();	$ASLOCKSTATS = array(); $ASLOCKSTATSON = false; // filename => lock
+$JQMODE = 'sourceone';	// debug|source|sourceone (debug is SCRIPT tag per file, sourceone is stuff put into one file)
+$JQMAP = array( 'libs' => 'jquery.', 'basics' => '', 'advanced' => '');
+$JQ = array(		// {{{ all JQ files (jquery.*.js)
+	'libs' => array( 	// those that cannot be changed
+		'1.6.4', 'base64', 'form', 'json.2.3', 'Storage', 'svg', 'timers' //, 'lzw-async'
+	),
+	'basics' => array( 'ioutils', 'iobase'),
+	'advanced' => array(
+		'iodraw',
+		// ioatoms
+		'ioatoms',
+		'ioatoms.input', 'ioatoms.containers', 
+		'ioatoms.output', 'ioatoms.gui', 'ioatoms.gridgui'
+	)
+); // }}}
+$env = makenv(); // CDIR,BIP,SBDIR,ABDIR,BDIR,BURL,ANAME,DBNAME,ASESSION,RIP,RPORT,RAGENT
+//var_dump( $env);
+foreach ( $env as $k => $v) $$k = $v;
+$DB = null; $DBNAME = $ANAME;	// db same as ANAME
+$MAUTHDIR = '/code/mauth';
+$MFETCHDIR = '/code/mfetch';
+// library loader
+if ( ! isset( $LIBCASES)) $LIBCASES = array( 'commandline', 'csv', 'filelist', 'hashlist', 'hcsv', 'json', 
+	'json', 'math', 'string', 'time', 'db', 'proc', 'async', 'plot', 
+	'ngraph', 'objects', 'chart', 'r', 'mauth', 'matrixfile', 'matrixmath',
+	'binary', 'curl', 'mfetch', 'network', 'remote', 'lucene', 'pdf', 'crypt', 'file', 'dll', 'hashing', 'queue',
+	'optimization', 'websocket'
+);
+//foreach ( $LIBCASES as $lib) require_once( "$ABDIR/lib/$lib.php");
+
+
+
+
 $CLHELP = array();
 // command line functions
 function clinit() {
@@ -287,13 +334,14 @@ $l = array();
 foreach ( $hl as $h) if ( isset( $h[ $key])) array_push( $l, $h[ $key]);
 return $l;
 }
-function hlf( $hl, $key = '', $value = '') {	// filters only lines with [ key [=value]]
-$lines = array();
+function hlf( &$hl, $key = '', $value = '', $remove = false) {	// filters only lines with [ key [=value]]
+$lines = array(); $hl2 = array();
 foreach ( $hl as $h) {
 if ( $key && ! isset( $h[ $key])) continue;
-if ( ( $key && $value) && ( ! isset( $h[ $key]) || $h[ $key] != $value)) continue;
+if ( ( $key && $value) && ( ! isset( $h[ $key]) || $h[ $key] != $value)) { lpush( $hl2, $h); continue; }
 array_push( $lines, $h);
 }
+if ( $remove) $hl = $hl2;	// replace the original hashlist
 return $lines;
 }
 function hlm( $hl, $purge = '') {	// merging hash list, $purge can be an array
@@ -429,7 +477,7 @@ if ( ! $parts) return '';
 if ( $base64) return base64_encode( implode( $bd, $parts));
 return implode( $bd, $parts);
 }
-function ttl( $t, $d = ',', $cleanup = "\n:\t", $skipempty = true, $base64 = false) { // text to list
+function ttl( $t, $d = ',', $cleanup = "\n:\t", $skipempty = true, $base64 = false, $donotrim = false) { // text to list
 if ( ! $cleanup) $cleanup = '';
 if ( $base64) $t = base64_decode( $t);
 $l = explode( ':', $cleanup);
@@ -437,7 +485,7 @@ foreach ( $l as $i) if ( $i != $d) $t = str_replace( $i, ' ', $t);
 $l = array();
 $parts = explode( $d, $t);
 foreach ( $parts as $p) {
-$p = trim( $p);
+if ( ! $donotrim) $p = trim( $p);
 if ( ! strlen( $p) && $skipempty) continue;	// empty
 array_push( $l, $p);
 }
@@ -546,203 +594,6 @@ array_push( $lines, $h);
 hcsvclose( $hcsv);
 return $lines;
 }
-
-
-?><?php
-// json object library, requires json.php
-$JO = array();
-function jsonencode( $data, $tab = 1, $linedelimiter = "\n") { switch ( gettype( $data)) {
-case 'boolean': return ( $data ? 'true' : 'false');
-case 'NULL': return "null";
-case 'integer': return ( int)$data;
-case 'double':
-case 'float': return ( float)$data;
-case 'string': {
-$out = '';
-$len = strlen( $data);
-$special = false;
-for ( $i = 0; $i < $len; $i++) {
-$ord = ord( $data{ $i});
-$flag = false;
-switch ( $ord) {
-case 0x08: $out .= '\b'; $flag = true; break;
-case 0x09: $out .= '\t'; $flag = true; break;
-case 0x0A: $out .=  '\n'; $flag = true; break;
-case 0x0C: $out .=  '\f'; $flag = true; break;
-case 0x0D: $out .= '\r'; $flag = true; break;
-case  0x22:
-case 0x2F:
-case 0x5C: $out .= '\\' . $data{ $i}; $flag = true; break;
-}
-if ( $flag) { $special = true; continue; } // switched case
-
-// normal ascii
-if ( $ord >= 0x20 && $ord <= 0x7F) {
-$out .= $data{ $i}; continue;
-}
-// unicode
-if ( ( $ord & 0xE0) == 0xC0) {
-$char = pack( 'C*', $ord, ord( $data{ $i + 1}));
-$i += 1;
-$utf16 = mb_convert_encoding( $char, 'UTF-16', 'UTF-8');
-$out .= sprintf( '\u%04s', bin2hex( $utf16));
-$special = true;
-continue;
-}
-if ( ( $ord & 0xF0) == 0xE0) {
-$char = pack( 'C*', $ord, ord( $data{ $i + 1}), ord( $data{ $i + 2}));
-$i += 2;
-$utf16 = mb_convert_encoding( $char, 'UTF-16', 'UTF-8');
-$out .= sprintf( '\u%04s', bin2hex($utf16));
-$special = true;
-continue;
-}
-if ( ( $ord & 0xF8) == 0xF0) {
-$char = pack( 'C*', $ord, ord( $data{ $i + 1}), ord( $data{ $i + 2}), ord( $data{ $i + 3}));
-$i += 3;
-$utf16 = mb_convert_encoding( $char, 'UTF-16', 'UTF-8');
-$out .= sprintf( '\u%04s', bin2hex( $utf16));
-$special = true;
-continue;
-}
-if ( ( $ord & 0xFC) == 0xF8) {
-$char = pack( 'C*', $ord, ord( $data{ $i + 1}), ord( $data{ $i + 2}), ord( $data{ $i + 3}), ord( $data{ $i + 4}));
-$c += 4;
-$utf16 = mb_convert_encoding( $char, 'UTF-16', 'UTF-8');
-$out .= sprintf( '\u%04s', bin2hex( $utf16));
-$special = true;
-continue;
-}
-if ( ( $ord & 0xFE) == 0xFC) {
-$char = pack( 'C*', $ord, ord( $data{ $i + 1}), ord( $data{ $i + 2}), ord( $data{ $i + 3}), ord( $data{ $i + 4}), ord( $data{ $i + 5}));
-$c += 5;
-$utf16 = mb_convert_encoding( $char, 'UTF-16', 'UTF-8');
-$out .= sprintf( '\u%04s', bin2hex( $utf16));
-$special = true;
-continue;
-}
-}
-return '"' . $out . '"';
-}
-case 'array': {
-if ( is_array( $data) && count( $data) && ( array_keys( $data) !== range( 0, sizeof( $data) - 1))) {
-$parts = array();
-foreach ( $data as $k => $v) {
-$part = '';
-for ( $i = 0; $i < $tab; $i++) $part .= "\t";
-$part .= '"' . $k . '"' . ': ' . jsonencode( $v, $tab + 1);
-array_push( $parts, $part);
-}
-return "{" . $linedelimiter . implode( ",$linedelimiter", $parts) . '}';
-}
-// not a hash, but an array
-$parts = array();
-foreach ( $data as $v) {
-$part = '';
-for ( $i = 0; $i < $tab; $i++) $part .= "\t";
-array_push( $parts, $part . jsonencode( $v, $tab + 1));
-}
-return "[$linedelimiter" . implode( ",$linedelimiter", $parts) . ']';
-}
-
-}}
-// JSON functions (class at the end) (requires json class to be imported)
-function jsonparse( $text) { return json_decode( $text, true); }
-function jsonload( $filename, $ignore = false, $lock = false) {	// load from file and then parse
-global $ASLOCKON, $IOSTATSON, $IOSTATS;
-$lockd = $ignore ? $lock : $ASLOCKON;	// lock decision, when ignore is on, listen to local flag
-$time = null; if ( $lockd) list( $time, $lock) = aslock( $filename);
-if ( $IOSTATSON) lpush( $IOSTATS, tth( "type=jsonload.aslock,time=$time"));
-$start = null; if ( $IOSTATSON) $start = tsystem();
-$body = ''; $in = @fopen( $filename, 'r'); while ( $in && ! feof( $in)) $body .= trim( fgets( $in));
-if ( $in) fclose( $in);
-if ( $IOSTATSON) lpush( $IOSTATS, tth( "type=jsonload.fread,time=" . round( tsystem() - $start, 4)));
-if ( $lockd) asunlock( $filename, $lock);
-$info = $body ? @jsonparse( $body) : null;
-if ( $IOSTATSON) lpush( $IOSTATS, tth( "type=jsonload.done,took=" . round( 1000000 * ( tsystem() - $start)) . ',size=' . ( $body ? strlen( $body) : 0)));
-return $info;
-}
-function jsondump( $jsono, $filename, $ignore = false, $lock = false) {	// dumps to file, does not use JSON class
-global $ASLOCKON, $IOSTATSON, $IOSTATS;
-$lockd = $ignore ? $lock : $ASLOCKON;	// lock decision, when ignore is on, listen to local flag
-$time = null; if ( $lockd)  list( $time, $lock) = aslock( $filename);
-if ( $IOSTATSON) lpush( $IOSTATS, tth( "type=jsondump.aslock,time=$time"));
-$start = null; if ( $IOSTATSON) $start = tsystem();
-$text = jsonencode( $jsono);
-if ( $IOSTATSON) lpush( $IOSTATS, tth( "type=jsondump.jsonencode,time=" . round( tsystem() - $start, 4)));
-$out = fopen( $filename, 'w'); fwrite( $out, $text); fclose( $out);
-if ( $lockd) asunlock( $filename, $lock);
-if ( $IOSTATSON) lpush( $IOSTATS, tth( "type=jsondump.done,took=" . round( 1000000 * ( tsystem() - $start)) . ',size=' . strlen( $text)));
-}
-function jsonsend( $jsono, $header = false) {	// send to browser, do not use JSON class
-if ( $header) header( 'Content-type: text/html');
-echo jsonencode( $jsono);
-}
-function jsonsendbycallback( $jsono) {	// send to browser, do not use JSON class
-$txt = $jsono === null ? null : base64_encode( json_encode( $jsono));
-echo "eval( callback)( '$txt')\n";
-}
-function jsonsendbycallbackm( $items, $asjson = false) {	// send to browser, do not use JSON class, send a LIST of items, first aggregating, then calling a callback
-echo "var list = [];\n";
-foreach ( $items as $item) echo "list.push( " . ( $asjson ? json_encode( $item) : $item) . ");\n";
-echo "eval( callback)( list);\n";
-}
-
-// json2h and back translations
-function h2json( $h, $base64 = false, $base64keys = '', $singlequotestrings = false, $bzip = false) {
-if ( ! $base64keys) $base64keys = array();
-if ( $base64keys && is_string( $base64keys)) $base64keys = ttl( $base64keys, '.');
-foreach ( $base64keys as $k) $h[ $k] = base64_encode( $h[ $k]);
-if ( $singlequotestrings) foreach ( $h as $k => $v) if ( is_string( $v)) $h[ $k] = "'$v'";
-$json = jsonencode( $h);
-if ( $bzip) $json = bzcompress( $json);
-if ( $base64) $json = base64_encode( $json);
-return $json;
-}
-function json2h( $json, $base64 = false, $base64keys = '', $bzip = false) {
-if ( ! $base64keys) $base64keys = array();
-if ( $base64keys && is_string( $base64keys)) $base64keys = ttl( $base64keys, '.');
-if ( $base64) $json = base64_decode( $json);
-if ( $bzip) $json = bzdecompress( $json);
-$h = @jsonparse( $json);
-if ( $h) foreach ( $base64keys as $k) $h[ $k] = base64_decode( $h[ $k]);
-return $h;
-}
-
-// read entire json64 files
-function b64jsonload( $file, $json = true, $base64 = true, $bzip = false) {
-$in = finopen( $file); $HL = array();
-while ( ! findone( $in)) {
-list( $h, $progress) = finread( $in, $json, $base64, $bzip); if ( ! $h) continue;
-lpush( $HL, $h);
-}
-finclose( $in); return $HL;
-}
-function b64jsonldump( $HL, $file, $json = true, $base64 = true, $bzip = false) {
-$out = foutopen( $file, 'w'); foreach ( $HL as $h) foutwrite( $out, $h, $json, $base64, $bzip); foutclose( $out);
-}
-
-
-// json object functions, all return $JO (for shorthand)
-function jsonerr( $err) {
-global $JO;
-if ( ! isset( $JO[ 'errs'])) $JO[ 'errs'] = array();
-array_push( $JO[ 'errs'], $err);
-return $JO;
-}
-function jsonmsg( $msg) {
-global $JO;
-if ( ! isset( $JO[ 'msgs'])) $JO[ 'msgs'] = array();
-array_push( $JO[ 'msgs'], $msg);
-return $JO;
-}
-function jsondbg( $msg) {
-global $JO;
-if ( ! isset( $JO[ 'dbgs'])) $JO[ 'dbgs'] = array();
-array_push( $JO[ 'dbgs'], $msg);
-return $JO;
-}
-
 
 ?><?php
 // json object library, requires json.php
@@ -1032,14 +883,16 @@ $min = mmin( $list);
 $list2 = array(); foreach ( $list as $v) lpush( $list2, $v - $min);
 return $list2;
 }
-function mlog( $list, $min, $realvalues = false, $aboveone = false, $precision = 5) 	{	// takes fraction of 1, boots to min, logs, and puts back to 0..1
-$list1 = array();
-foreach ( $list as $item) array_push( $list1, $min + ( $aboveone ? $item : $item * ( 1.0 - $min)));
-$list2 = array();
-foreach ( $list1 as $item) array_push( $list2, log10( $item));
-$list3 = mnorm( $list2, null, null, $precision);
-if ( ! $realvalues) return $list3;
-return mmap( $list3, mmin( $list), mmax( $list), $precision);
+function mlog( $list, $digits = 5, $neg = null, $zero = null) { // for all x < 0 returns ( -log( abs( x) OR NEG), for all 0 returns 0 OR ZERO
+$L = array();
+foreach ( $list as $v) {
+if ( $v < 0) $v2 = $neg === null ? - log10( abs( $list)) : $neg;
+else if ( $v == 0) $v2 = $zero === null ? 0 : $zero;
+else $v2 = log10( $v);
+$v2 =  round( $v2, $digits);
+lpush( $L, $v2);
+}
+return $L;
 }
 function mmap( $list, $min, $max, $precision = 5, $normprecision = 5) {
 $list2 = mnorm( $list, null, null, $normprecision);
@@ -3381,6 +3234,8 @@ $ystep = ( $ymax - $ymin) / $ycount;
 $ystep = $yroundstep * (  1 + ( int)( $ystep / $yroundstep)); if ( $ystep < $yroundstep) $ystep = $yroundstep;
 $FS->xticks = "$xmin,$xmax,$xstep";
 $FS->yticks = "$ymin,$ymax,$ystep";
+$this->xticks = $FS->xticks;
+$this->yticks = $FS->yticks;
 //echo "xticks[" . $FS->xticks . "]  yticks[" . $FS->yticks . "]\n";
 }
 public function forget() {	// forget training
@@ -3423,7 +3278,8 @@ if ( ! is_array( $xname)) $this->xname( $xname, "-7:-$maxh"); // not categorical
 }
 if ( $yname) { // draw y scale
 // y scale
-$yticks = $FS->yticks;
+$yticks = $this->yticks;
+//echo " yticks: " . json_encode( $yticks) . "\n";
 if ( is_string( $yticks) && count( ttl( $yticks)) == 3) { // string( min, max, step) style
 extract( lth( ttl( $yticks), 'def'));
 $yticks = array();
@@ -3451,10 +3307,10 @@ extract( $this->info()); // xmin, ymin, xmax, ymax
 plotline( $this->plot, "$xmin:-2", $ymin, "$xmin:-2", $ymax, $FS->linestyle->lw, $FS->linestyle->draw, $FS->linestyle->alpha);
 }
 // when drawing ticks and axis names manually, do not forget that xmin and ymin could be updated to new values if frame() (and some other) functions were called before
-public function xtick( $v, $x) { // returns height of current string
+public function xtick( $show, $x) { // returns height of current string
 extract( $this->info( true)); // xmin, ymin, xmax, ymax
 plotline( $this->plot, $x, "$ymin:-2", $x, "$ymin:-5", $FS->linestyle->lw, $FS->linestyle->draw, $FS->linestyle->alpha);
-return htv( plotstringtc( $this->plot, $x, "$ymin:-7", $v, $FS->fontsize, $FS->textstyle->draw, $FS->textstyle->alpha), 'h');
+return htv( plotstringtc( $this->plot, $x, "$ymin:-7", "$show", $FS->fontsize, $FS->textstyle->draw, $FS->textstyle->alpha), 'h');
 }
 public function xtickv( $v, $x) { // returns height of current string -- vertical view
 extract( $this->info( true)); // xmin, xmax, ymin, ymax, FS
@@ -3742,7 +3598,7 @@ function chartext( $c, $xs, $ys, $texts, $style = NULL, $fontsize = null, $funct
 if ( ! is_array( $texts)) { $L = array(); foreach ( $xs as $x) lpush( $L, $texts); $texts = $L; }
 if ( ! $style) $style = $c->setup->style;
 for ( $i = 0; $i < count( $xs); $i++)
-$function( $c->plot, $xs[ $i], $ys[ $i], $texts[ $i], $fontsize, $style->draw, $style->alpha);
+$function( $c->plot, $xs[ $i], $ys[ $i], '' . $texts[ $i], $fontsize, $style->draw, $style->alpha);
 }
 
 // will return array (same as split setup dimensions) with frame setups !== chart objects
@@ -3877,9 +3733,12 @@ $rows = array();
 while ( count( $lines)) {
 $line = trim( lshift( $lines)); if ( ! $line) break;
 $L = ttl( $line, ' '); $head = lshift( $L);
+//echo " line($line) head($head) L:" . json_encode( $L) . "\n";
 if ( strpos( $head, ',]') === false) continue; // next line
-htouch( $rows, $head); foreach ( $L as $v) lpush( $rows[ $head], $v);
+$head = str_replace( ',', '', $head);
+htouch( $rows, "$head"); foreach ( $L as $v) lpush( $rows[ "$head"], $v);
 }
+//echo " read matrix OK\n";
 return hv( $rows);	// same as mx object: [ rows: [ cols]]
 }
 function Rreadlisthash( &$lines) {	// reads hash of lists
@@ -3900,18 +3759,18 @@ return hv( $rows);
 
 
 // permutation entropy -- uses PDC package (linux only)
-function Rpe( $L, $mindim = 3, $maxdim = 7, $lagmin = 1, $lagmax = 1) { 	// list of values, returns minimum PE
+function Rpe( $L, $mindim = 2, $maxdim = 7, $lagmin = 1, $lagmax = 1, $cleanup = true) { 	// list of values, returns minimum PE
 $R = "library( pdc)\n";
 $R .= "pe <- entropy.heuristic( c( " . ltt( $L) . "), m.min=$mindim, m.max=$maxdim, t.min=$lagmin, t.max=$lagmax)\n";
 $R .= 'pe$entropy.values';
-$mx = mxtranspose( Rreadmatrix( Rscript( $R))); if ( ! $mx || ! is_array( $mx) || ! isset( $mx[ 2])) die( " bad R.PE\n");
+$mx = mxtranspose( Rreadmatrix( Rscript( $R, 'pe', false, $cleanup))); if ( ! $mx || ! is_array( $mx) || ! isset( $mx[ 2])) die( " bad R.PE\n");
 $h  = array();
 return round( mmin( $mx[ 2]), 2); // return the samelest PE among dimensions
 }
 
 
 // string functions
-function Rstrcmp( $one, $two, $cleanup = true) {
+function RSstrcmp( $one, $two, $cleanup = true) {
 $R = "agrep( '$one', '$two')";
 $L = Rreadlist( Rscript( $R, null, true, $cleanup));
 if ( ! $L && ! count( $L)) return 0;
@@ -4055,6 +3914,13 @@ if ( ! isset( $clusters[ $out[ $i] - 1])) die( "ERROR! Rkmeans() no cluster(" . 
 lpush( $clusters[ $out[ $i] - 1], $list[ $i]);
 }
 return $clusters;
+}
+function Rkmeanshash( $list, $means, $digits = 5) { 	// returns { 'center': [ data], ...}
+$L = Rkmeans( $list, $means, true);
+if ( count( $L) != $means) die( " Rkmeanshash() ERROR! count(" . count( $L) . ") != means($means)\n");
+$h = array();
+foreach ( $L as $L2) $h[ '' . round( mavg( $L2), $digits)] = $L2;
+return $h;
 }
 
 
@@ -5213,471 +5079,143 @@ return FALSE;
 
 }
 
-// this class is just an interface/example, pass your own (mirrored) class to nserver()
-class NServer {	// interface, mirror in myNServer to get notified
-public $active;	// true while working, false will kill server
-// type (string|hash|file), status (true|false), info(path,string,hash), size, rx statistics (time interval between chunks in us)
-public function onload( $type, $rip, $port, $status, $info = '', $size = 0, $stats = array()) {}
-// events are newsocket|abort|start|chunk|end|timeout, info is a hash
-public function onevent( $type, $info = array()) { }
-// types are sock,error,info,start,list,chunk,end,exit
-public function debug( $type, $msg) {} // for all small events and changes
-// called before nserver function exits, so, wrap up in this method
-public function error( $msg) { }	// when something goes wrong
+class NTCPClient {
+public $id;
+public $sock;
+public $lastime;
+public $inbuffer = '';
+public $outbuffer = '';
+public $buffersize;
+// hidden functions -- not part of the interface
+public function __construct() { }
+public function init( $rip = null, $rport = null, $id = null, $sock = null, $buffersize = 2048) {
+$this->id = $id ? $id : uniqid();
+if ( $sock) $this->sock = $sock;
+else { 	// create new socket
+$sock = socket_create( AF_INET, SOCK_STREAM, SOL_TCP) or die( "ERROR (NTCPClient): could not create a new socket.\n");
+@socket_set_nonblock( $sock); $status = false;
+$limit = 5; while ( $limit--) {
+$status = @socket_connect( $sock, $rip, $rport);
+if ( $status || socket_last_error() == SOCKET_EINPROGRESS) break;
+usleep( 10000);
 }
-/** main (continuous) TCP server, can rx files|strings|hashes
-*	$port to listen on (on all interfaces)
-*	&$nserver class with methods as in NServer class above
-*		methods will be called on various events and completed rx processes
-*	$path the path to a directory (no trailing slash) to restrict saving files to
-*		(in this case, files from the other side can be passed as filenames only, no path
-*	$timeout in seconds, if >0 then will send 'timeout' event when over
-*	$usleep is the sleep time in each loop, 200ms seems to be good generally
-*/
-function nserver( $port, $nserver, $path = '', $timeout = 0, $usleep = 300000) { // strings, hashes, and files
-$info = ntcprxopen( $port);  $start = tsystem();
-if ( $info[ 'error']) return $nserver->error( "could not open socket on port[$port]\n");
-$server = $info[ 'sock'];
-$socks = array(); $infos = array(); $stats = array();
-while ( 1) {
-if ( $timeout && tsystem() - $start > $timeout) {	// send timeout event
-$newtimeout = $nserver->onevent( 'timeout', array());
-if ( $newtimeout) $timeout = ( int)$newtimeout;
-if ( ! $timeout) $timeout = 1;
-$start = tsystem();
+if ( ! $status && socket_last_error() != SOCKET_EINPROGRESS) die( "ERROR (NTCPServer): could not connect to the new socket.\n");
+$this->sock = $sock;
 }
-if ( ! $nserver->active) { // wrap up gracefully
-$nserver->debug( 'exit', 'active flag is off');
-// fist, close all active sockets, if any
-foreach ( $socks as $sock) { @socket_shutdown( $sock); @socket_close( $sock); }
-return @socket_close( $server);	// abort mission
+$this->lastime = tsystem();
+$this->buffersize = $buffersize;
 }
-$sock = @ntcprxcheck( $server);
-if ( $sock) {
-//echo "new socket[$sock]\n";
-//echo "\n [" . count( $socks) . "] sockets";
-$rip = ''; $rport = -1; socket_getpeername( $sock, $rip, $rport);
-$nserver->debug( 'sock', "new socket [$sock] from rip[$rip] rport[$rport]");
-$info = ntcprxinfo( $sock);
-//if ( $info) echo ",  rx.info[" . htt( $info) . "]";
-//else echo ", no rx.info";
-if ( ! $info) {
-//echo ",  not info, shutting the socket";
-$nserver->debug( 'error', "could not get INFO block from rip[$rip] rport[$rport]");
-@socket_shutdown( $sock); socket_close( $sock);
+public function recv() {
+$buffer = '';
+$status = @socket_recv( $this->sock, $buffer, $this->buffersize, 0);
+//echo "buffer($buffer)\n";
+if ( $status <= 0) return null;
+$this->inbuffer .= substr( $buffer, 0, $status);
+return $this->parse();
 }
-else {	// good socket + good rx info, start working
-$nserver->debug( 'info', "got INFO from rip[$rip] rport[$rport], info[" . htt( $info) . "]");
-$info[ 'rip'] = $rip; $info[ 'rport'] = $rport;
-switch( $info[ 'type']) {
-case 'file': {
-if ( $path) { // check and finalize path to file
-if ( count( explode( '/', $info[ 'path'])) == 1) $info[ 'path'] = $path . '/' . $info[ 'path'];
-if ( strpos( $info[ 'path'], $path) !== 0) { 	// outside of allowed path
-$nserver->debug( 'error', "path [" . $info[ 'path'] . "] is not allowed for this server");
-ntcptxstatus( $sock, false, 'path not allowed because of restrictions');
-@socket_shutdown( $sock); socket_close( $sock);
-break;
+public function parse() {
+$B =& $this->inbuffer;
+//echo "B:$B\n";
+if ( strpos( $B, 'FFFFF') !== 0) return;
+$count = '';
+for ( $pos = 5; $pos < 25 && ( $pos + 5 < strlen( $B)); $pos++) {
+if ( substr( $B, $pos, 5) == 'FFFFF') { $count = substr( $B, 5, $pos - 5); break; }
 }
+if ( ! strlen( $count)) return;	// nothing to parse yet
+if ( strlen( $B) < 5 * 2 + strlen( $count) + $count) return null;	// the data has not been collected yet
+$h = json2h( substr( $B, 5 * 2 + strlen( $count), $count), true, null, true);
+if ( strlen( $B) == 5 * 2 + strlen( $count) + $count) $B = '';
+$B = substr( $B, 5 * 2 + strlen( $count) + $count);
+return $h;
 }
-$nserver->onevent( 'newsocket', $info);
-$found = false; foreach ( $infos as $i) if ( isset( $i[ 'path']) &&  $i[ 'path'] == $info[ 'path']) { $found = true; break; }
-if ( $found) {	// file path clash!
-$nserver->debug( 'error', "path[" . $info[ 'path'] . "] clashes with another socket");
-ntcptxstatus( $sock, false, 'file path clash');
-@socket_shutdown( $sock); socket_close( $sock);
-$nserver->onevent( 'abort', $info);
-break;
-}
-$out = @fopen( $info[ 'path'], 'wb');
-if ( ! $out) {	// no such path
-$nserver->debug( 'error', "could not open path[" . $info[ 'path'] . "] on this machine");
-ntcptxstatus( $sock, false, 'path does not exist');
-@socket_shutdown( $sock); socket_close( $sock);
-$nserver->onevent( 'abort', $info);
-break;
-}
-// file write handler obtained successfully, keep working
-$info[ 'out'] = $out; $info[ 'rsize'] = 0;
-$status = ntcptxstatus( $sock, true);
-if ( ! $status) { 	// error transmitting INFO ACK
-$nserver->debug( 'error', "could not transmit INFO ACK to rip[$rip] rport[$rport]");
-@socket_shutdown( $sock); socket_close( $sock);
-$nserver->onevent( 'abort', $info);
-break;
-}
-array_push( $socks, $sock);
-array_push( $infos, $info);
-array_push( $stats, array( tsystem()));
-$nserver->onevent( 'start', $info);
-$nserver->debug( 'start', "started working on file RX");
-break;
-}
-default: {
-$nserver->onevent( 'newsocket', $info);
-//echo ", sending ACK for string";
-if ( ! ntcptxstatus( $sock, true)) {
-//echo " ERROR! could not tx info ACK!";
-$nserver->debug( 'error', "could not transmit INFO ACK to rip[$rip] rport[$rport]");
-@socket_shutdown( $sock); socket_close( $sock);
-$nserver->onevent( 'abort', $info);
-break;
-}
-array_push( $socks, $sock);
-array_push( $infos, $info);
-array_push( $stats, array( tsystem()));
-$nserver->onevent( 'start', $info);
-$nserver->debug( 'start', "started working on text RX");
-break;
-}
-}
-}
-}
-// process existing sockets
-$nserver->debug( 'list', 'there are [' . count( $socks) . '] in active list');
-for ( $i = 0; $i < count( $socks); $i++) {
-//echo "\n"; echo "working sock[". $socks[ $i] ."]";
-switch( $infos[ $i][ 'type']) {
-case 'file': {
-if ( $infos[ $i][ 'rsize'] == $infos[ $i][ 'size']) {	// OK
-//echo " finished rx, send data ACK\n";
-$nserver->debug( 'end', 'finished file RX on [' . htt( $infos[ $i]) . ']');
-ntcptxstatus( $socks[ $i], true);
-@socket_shutdown( $socks[ $i]);
-socket_close( $socks[ $i]);
-fclose( $infos[ $i][ 'out']);
-//echo "file[" . $infos[ $i][ 'path'] . "] size[" . $infos[ $i][ 'size'] . "]\n";
-$socks[ $i] = false;	// for cleanup
-$nserver->onevent( 'end', $infos[ $i]);
-$stat = mdistance( $stats[ $i]); for ( $ii = 0; $ii < count( $stat); $ii++) $stat[ $ii] = ( int)( 1000000 * $stat[ $ii]);
-$nserver->onload( 'file', $infos[ $i][ 'rip'], $infos[ $i][ 'rport'], true, $infos[ $i][ 'path'], $infos[ $i][ 'size'], $stat);
-break;
-}
-//echo "   rsize[" . $infos[ $i][ 'rsize'] . "] size[" . $infos[ $i][ 'size'] . "]";
-$status = ntcprxfileone( $socks[ $i], $infos[ $i][ 'out'], 1000);
-if ( $status === false) { 	// check if finished
-// bad transmission
-$nserver->debug( 'error', "did not receive all bytes on [" . htt( $infos[ $i])  . "]");
-ntcptxstatus( $socks[ $i], false, 'did not recieve all bytes');
-fclose( $infos[ $i][ 'out']); unlink( $infos[ $i][ 'path']); // delete file
-@socket_shutdown( $socks[ $i]);
-socket_close( $socks[ $i]);
-$socks[ $i] = false;
-echo "ERROR! bad rx of a file\n";
-$nserver->onevent( 'abort', $infos[ $i]);
-$nserver->onload( 'file', $infos[ $i][ 'rip'], $infos[ $i][ 'rport'], false);
-break;
-}
-$infos[ $i][ 'rsize'] += $status;
-$nserver->onevent( 'chunk', $infos[ $i]);
-$nserver->debug( 'chunk', "size [$status], on socket[" . htt( $infos[ $i]) . "]");
-array_push( $stats[ $i], tsystem());
-break;
-}
-default: {
-$text = ntcprxstring( $sock, $infos[ $i][ 'size']);
-if ( strlen( $text) != $infos[ $i][ 'size']) {	// failed
-//echo "failed to receive text, raw[$text]\n";
-ntcptxstatus( $socks[ $i], false, 'size does not match');
-@socket_shutdown( $socks[ $i]);
-socket_close( $socks[ $i]);
-//echo "ERROR! Failed rx of text type\n";
-$socks[ $i] = false;
-$nserver->onevent( 'abort', $infos[ $i]);
-$nserver->onload( $infos[ $i][ 'type'], $infos[ $i][ 'rip'], $infos[ $i][ 'rport'], false);
-break;
-}
-// OK
-//echo "raw[$text]\n";
-ntcptxstatus( $socks[ $i], true);
-@socket_shutdown( $socks[ $i]);
-socket_close( $socks[ $i]);
-//echo "text[$text]\n";
-$socks[ $i] = false;
-$nserver->onevent( 'chunk', $infos[ $i]);
-array_push( $stats[ $i], tsystem());
-$stat = mdistance( $stats[ $i]); for ( $ii = 0; $ii < count( $stat); $ii++) $stat[ $ii] = ( int)( 1000 * $stat[ $ii]);$stat = mdistance( $stats[ $i]); for ( $ii = 0; $ii < count( $stat); $ii++) $stat[ $ii] = ( int)( 1000000 * $stat[ $ii]);
-$nserver->onload( $infos[ $i][ 'type'], $infos[ $i][ 'rip'], $infos[ $i][ 'rport'], true, $infos[ $i][ 'type'] == 'hash' ? tth( $text) : $text, strlen( $text), $stat);
-break;
-}
-}
-}
-// sort the array removing finished entities
-$nsocks = array(); $ninfos = array(); $nstats = array();
-for ( $i = 0; $i < count( $socks); $i++) {
-if ( ! $socks[ $i]) continue;	// empty one
-array_push( $nsocks, $socks[ $i]);
-array_push( $ninfos, $infos[ $i]);
-array_push( $nstats, $stats[ $i]);
-}
-$socks = $nsocks; $infos = $ninfos; $stats = $nstats;
-if ( ! count( $socks)) usleep( $usleep);
-}
-
-}
-// all send functions return array( status, 'msg')
-function nsendstring( $rip, $rport, $text) {	// TCP string to a remote machine
-$info = ntcptxopen( $rip, $rport);
-$sock = $info[ 'sock']; if ( $info[ 'error']) { @socket_shutdown( $sock); socket_close( $sock); return array( false, "could not connect to remote socket rip[$rip] rport[$rport]"); }
-$in = ntcptxinfostring( $sock, $text); //echo "send tx info\n";
-if ( $in === false) { @socket_shutdown( $sock); socket_close( $sock); return array( false, "failed to send INFO block"); }
-$info = ntcprxstatus( $sock); if ( ! $info[ 'status']) { @socket_shutdown( $sock); socket_close( $sock); return array( false, "did not receive INFO ACK from rip[$rip] rport[$rport]"); }
-ntcptxstring( $sock, $text); //echo "sent string\n";
-//@ntcpshutwrite( $sock); //echo "closed writing, waiting for status\n";
-$info = ntcprxstatus( $sock); if ( ! $info[ 'status']) { @socket_shutdown( $sock); socket_close( $sock); return array( false, "did not receive DATA ACK"); }
-@socket_shutdown( $sock); socket_close( $sock);
-return array( true, 'ok');
-}
-function nsendfile( $rip, $rport, $path, $rpath) { 	// TCP file to a remote machine
-$info = ntcptxopen( $rip, $rport); if ( $info[ 'error']) return array( false, "could not connect to remote socket rip[$rip] rport[$rport]");
-$sock = $info[ 'sock'];
-$in = ntcptxinfofile( $sock, $path, $rpath);
-if ( $in === false) { @socket_shutdown( $sock); socket_close( $sock); return array( false, "failed while transmitting INFO to rip[$rip] rport[$rport]"); }
-$status = ntcprxstatus( $sock);
-if ( ! $status[ 'status']) { @socket_shutdown( $sock); socket_close( $sock); return array( false, "failed to receive INFO ACK from rip[$rip] rport[$rport]"); }
-while ( ntcptxfileone( $sock, $in, 1000, 30.0)) {}
-//@ntcpshutwrite( $sock);
-$status = ntcprxstatus( $sock, 1000, 60.0);
-if ( ! $status[ 'status']) { @socket_shutdown( $sock); socket_close( $sock); return array( false, "failed to receive DATA ACK from rip[$rip] rport[$rport]"); }
-@socket_shutdown( $sock); socket_close( $sock);
-return array( true, 'ok');
-}
-function nsendraw( $rip, $rport, $text, $length = 250) {	// TCP raw string to a remote machine
-$info = ntcptxopen( $rip, $rport); if ( $info[ 'error']) { @socket_shutdown( $sock); socket_close( $sock); return array( false, "could not connect to remote socket rip[$rip] rport[$rport]"); }
-$sock = $info[ 'sock'];
-if ( strlen( $text) != $length) $text = sprintf( '%' . $length . 's', $text);
-ntcptxstring( $sock, $text); //echo "sent string\n";
-@socket_shutdown( $sock); socket_close( $sock);
-return array( true, 'ok');
-}
-
-
-
-/* rx length-fixed message over UDP, timeout > 0 meanes non-block sockets
-*	$length is important
-*	$timeout=0 means block, otherwise, non-blocking
-*	if $sock is non-zero
-*	if $keep = true, will return the socket unclosed()
-* returns hash( 'msg', 'error', 'sock', 'rip', 'rport', 'stats' => hash( 'sock', 'rx'))
-*		(sock and rx are time(s,double) it took to set up socket and rx stuff)
-*		(rip and rport are remote IP and port of packet source)
-*/
-function nudprx( $port, $length = 250, $sock = -1, $keep = false, $timeout = 0) { // msg, error, stats ( sock, rx)
-$info = array( 'msg' => '', 'error' => true, 'sock' => -1, 'rip' => '', 'rport' => '', 'stats' => array( 'sock' => -1, 'rx' => -1));
-// bind to socket
-if ( $sock == -1) {	// no socket passed, create new
-$start = tsystem();
-$sock = socket_create( AF_INET, SOCK_DGRAM, SOL_UDP);
-$status = socket_bind( $sock, '0', $port);
-$c = 10; while ( ! $status && $c--) {
-usleep( mt_rand( 10000, 100000));
-$status = socket_bind( $sock, $BIP, $port);
-}
-$end = tsystem(); $info[ 'stats'][ 'sock'] = $end - $start;
-if ( ! $status) { $info[ 'msg'] = "could not bind to port[$port]"; @socket_close( $sock); return $info; }
-if ( $timeout > 0) @socket_set_nonblock( $sock);
-$info[ 'sock'] = $sock;
-}
-else { $info[ 'sock'] = $sock; $end = tsystem(); }
-// rx the message
-$start = $end; $msg = '';
-//echo "sock[$sock]\n";
-$c = 1000; while ( $c-- && ( ( ! $timeout || ( $timeout > 0 &&  $end - $start < $timeout)))) {
-$status = socket_recvfrom( $sock, $info[ 'msg'], $length, 0, $info[ 'rip'], $info[ 'rport']);
-//echo " [$status]";
-//echo " status[$status]";
-if ( $status > 0) break;	// rx success
-usleep( mt_rand( 10000, 100000));
-$end = tsystem(); continue;
-}
-$end = tsystem(); $info[ 'stats'][ 'rx'] = $end - $start;
-if ( strlen( $info[ 'msg']) == $length) $info[ 'error'] = false;
-else $info[ 'msg'] = @socket_strerror( @socket_last_error( $sock));
-if ( $timeout && ( $end - $start >= $timeout)) $info[ 'msg'] = 'timeout reached while waiting on socket';
-if ( ! $keep) socket_close( $info[ 'sock']);
-return $info;
-}
-/* tx length-fixed message over UDP
-*	if $length = -1, will use actual string length of $msg
-*	if $sock != -1, will not create new but will use old
-*	if $keep = true, will not close socket when finished
-*	returns hash( 'error', 'msg', 'sock', 'stats' => hash( 'tx'))
-*		(if 'error' = false, them message is the original one
-*		otherwise, contains error message)
-*		tx in stats is time it took to transmit the message
-*/
-function nudptx( $rip, $rport, $msg, $length = -1, $sock = -1, $keep = false) {
-$info = array( 'error' => true, 'msg' => '', 'sock' => -1, 'stats' => array( 'tx' => 0));
-$start = tsystem();
-if ( $sock == -1) $sock = @socket_create( AF_INET, SOCK_DGRAM, SOL_UDP);
-$info[ 'sock'] = $sock;
-//echo "sock[$sock]\n";
-if ( $length == -1) $length = strlen( $msg);
-$msg = sprintf( '%' . $length . 's', $msg);
-$status = socket_sendto( $sock, $msg, strlen( $msg), 0, $rip, $rport);
-//echo "status[$status]\n";
-if ( $status != $length) { $info[ 'msg'] = @socket_strerror( @socket_last_error( $sock)); $info[ 'status'] = $status; }
-else $info[ 'error'] = false;
-if ( ! $keep) @socket_close( $sock);
-$info[ 'stats'][ 'tx'] = tsystem() - $start;
-return $info;
-}
-
-
-
-//
-// raw TCP functions
-//
-
-// opens tcp port and starts to listen, returns sock,msg,error (non-blocking socket)
-function ntcprxopen( $port, $nonblock = false) {
-global $BIP;
-$info = array( 'sock' => -1, 'error' => true, 'msg' => '');
-$sock = socket_create_listen( $port);
-//$status = socket_bind( $sock, $BIP, $port);
-//$c = 10; while ( $c-- && ! $status) {
-//	usleep( mt_rand( 10000, 1000000));
-//	$status = socket_bind( $sock, $BIP, $port);
-//}
-if ( $sock) {
-$info[ 'sock'] = $sock;
-$info[ 'error'] = false;
-if ( $nonblock) @socket_set_nonblock( $sock);
-@socket_listen( $sock);
-}
-else $info[ 'msg'] = "could not bind to port[$port]\n";
-return $info;
-}
-function ntcptxopen( $rip, $rport) {
-$info = array( 'error' => true, 'msg' => '', 'sock' => -1);
-$start = tsystem();
-$sock = socket_create( AF_INET, SOCK_STREAM, SOL_TCP);
-$info[ 'sock'] = $sock;
-$status = @socket_connect( $sock, $rip, $rport); //$rip, $rport);
-$c = 200; while ( $c-- && ! $status) {
-usleep( mt_rand( 100000, 800000));
-$status = socket_connect( $sock, $rip, $rport);
-echo " $status"; usleep( 500000);
-}
-if ( ! $status) { $info[ 'msg'] = @socket_strerror( @socket_last_error( $sock)); return $info; }
-//echo "socket conn OK\n";
-$info[ 'sock'] = $sock;
-$info[ 'error'] = false;
-@socket_set_nonblock( $sock);
-return $info;
-}
-// returns sock if new connections, FALSE otherwise
-function ntcprxcheck( $sock) {
-$sock = @socket_accept( $sock);
-if ( $sock === FALSE) return $sock;
-return $sock;
-}
-
-// sends info hash to the other side to prepare connection
-function ntcptxinfo( $sock, $info, $length = 1000) {
-$info = sprintf( '%' . $length . 's', htt( $info));
-if ( strlen( $info) > $length) return false;	// info string too long
-return ntcptxstring( $sock, $info);
-}
-// prepares and sends file info, returns open file handler
-function ntcptxinfofile( $sock, $path, $rpath, $length = 1000) { // false | file handler
-if ( ! is_file( $path)) return false;
-$size = filesize( $path); if ( ! $size || $size <= 0) return false; // strange size
-$info = array( 'type' => 'file', 'path' => $rpath, 'size' => $size);
-$status = ntcptxinfo( $sock, $info, $length);
-if ( $status) return fopen( $path, 'rb');
+public function send( $h = null, $persist = false) { 	// will send bz64json( msg)
+$B =& $this->outbuffer;
+//echo "send: $B\n";
+if ( $h !== null && is_string( $h)) $h = tth( $h);
+if ( $h !== null) { $B = h2json( $h, true, null, null, true); $B = 'FFFFF' . strlen( $B) . 'FFFFF' . $B; }
+$status = @socket_write( $this->sock, $B, strlen( $B) > $this->buffersize ? $buffersize : strlen( $B));
+$B = substr( $B, $status);
+if ( $B && $persist) return $this->send( null, true);
 return $status;
 }
-// prepares for sending over a string
-function ntcptxinfostring( $sock, $string, $length = 1000) {
-$info = array( 'type' => 'string', 'size' => strlen( $string));
-return ntcptxinfo( $sock, $info, $length);
+public function isempty() { return $this->outbuffer ? false : true; }
+public function close() { @socket_close( $this->sock); }
 }
-// sends over status hash
-function ntcptxstatus( $sock, $status, $msg = 'none', $length = 1000) {
-$info = array( 'type' => 'status', 'status' => ( $status ? 'true' : 'false'), 'msg' => $msg);
-return ntcptxinfo( $sock, $info, $length);
+class NTCPServer {
+public $port;
+public $sock;
+public $socks = array();
+public $clients = array();
+public $buffersize = 2048;
+public $nonblock = true;
+public $usleep = 10;
+public $timeout;
+public $clientclass;
+public function __construct() {}
+public function start( $port, $nonblock = false, $usleep = 0, $timeout = 300, $clientclass = 'NTCPClient') {
+$this->port = $port;
+$this->nonblock = $nonblock;
+$this->clientclass = $clientclass;
+$this->usleep = $usleep;
+$this->timeout = $timeout;
+$this->sock = socket_create( AF_INET, SOCK_STREAM, SOL_TCP)  or die( "ERROR (NTCPServer): failed to creater new socket.\n");
+socket_set_option( $this->sock, SOL_SOCKET, SO_REUSEADDR, 1) or die( "ERROR (NTCPServer): socket_setopt() filed!\n");
+if ( $nonblock) socket_set_nonblock( $this->sock);
+$status = false; $limit = 5;
+while ( $limit--) {
+$status = @socket_bind( $this->sock, '0.0.0.0', $port);
+if ( $status) break;
+usleep( 10000);
 }
-
-
-/** send the contents of a string over TCP socket
-*	$sock the TCP socket
-*	$in FILE handle in reading mode
-*	$length length of chunk in bytes, will keep sending until finished
-* returns true (chunk sent fine), null (end of file), false (error in channel)
-*/
-function ntcptxfileone( $sock, $in, $length, $timeout = 30) {
-if ( feof( $in)) return null; //{ echo " EOF!"; return null; }
-$chunk = fread( $in, $length); $start = tsystem();
-if ( strlen( $chunk) == 0) return true;	// will feof() next time
-while ( strlen( $chunk)) {
-$status = @socket_write( $sock, $chunk, strlen( $chunk));
-if ( $status === FALSE && tsystem() - $start > $timeout) return false;
-$chunk = substr( $chunk, $status);
-}
-//echo " $length";
-return true;
-}
-// same as above, but sends a string
-function ntcptxstring( $sock, $chunk, $timeout = 30) { // returns true|false
-//echo "\n\n"; echo "ntcptxstring()   string[$chunk]";
-$start = tsystem();
-while ( strlen( $chunk)) {
-$status = @socket_write( $sock, $chunk, strlen( $chunk));
-if ( $status === FALSE && tsystem() - $start > $timeout) return false;
-//echo " [$status]";
-if ( $status == strlen( $chunk)) break;
-$chunk = substr( $chunk, $status);
-}
-//echo "\n";
-return true;
-}
-
-// reads the size of the content
-function ntcprxinfo( $sock, $length = 1000) {	// return hash (after check)
-$chunk = ntcprxstring( $sock, $length);
-if ( strlen( $chunk) != $length) return false;
-return tth( trim( $chunk));
-}
-// reads from socket into a file until false|length are reached
-function ntcprxfileone( $sock, $out, $length, $timeout = 30) {	// returns length or false
-$rlength = 0; $start = tsystem();
-while ( $rlength < $length) {
-$status = @socket_read( $sock, $length);
-if ( $status === false && tsystem() - $start > $timeout) return ( $rlength > 0 ? $rlength : $status);
-fwrite( $out, $status, strlen( $status));
-$rlength += strlen( $status);
-}
-return $rlength;
-}
-// reads from socket into a string
-function ntcprxstring( $sock, $length = 1000, $timeout = 30) {	// returns content
-$content = '';  $start = tsystem();
-//echo "\n\n"; echo "ntcprxstring():";
-while ( strlen( $content) < $length) {
-$status = @socket_read( $sock, $length);
-if ( $status === false && tsystem() - $start > $timeout) break;
-$content .= $status;
-//echo "  [$status]";
-}
-//echo "... done\n";
-return $content;
-}
-// recieved and interprets status hash
-function ntcprxstatus( $sock, $length = 1000, $timeout = 30) {	// returns hash or false
-$text = ntcprxstring( $sock, $length, $timeout);
-if ( ! strlen( $text) || strlen( $text) != $length) return false;
-$info = tth( trim( $text));
-if ( $info[ 'type'] != 'status') return false;
-$info[ 'status'] = ( $info[ 'status'] == 'true' ? true : false);
-return $info;
+if ( ! $status) die( "ERROR (NTCPServer): cound not bind the socket.\n");
+socket_listen( $this->sock, 20) or die( "ERROR (NTCPServer): could not start listening to the socket.\n");
+$this->socks = array( $this->sock);
+while ( 1) { if ( $this->timetoquit()) break; foreach ( $this->socks as $sock) {
+if ( $sock == $this->sock) { // main socket, check for new connections
+$client = @socket_accept( $sock);
+if ( $client) {
+//echo "new client $client\n";
+if ( $this->nonblock) @socket_set_nonblock( $client);
+lpush( $this->socks, $client);
+$client = new $this->clientclass();
+$client->init( null, null, uniqid(), $client, $this->buffersize);
+lpush( $this->clients, $client);
+$this->newclient( $client);
 }
 
+}
+else { // existing socket
+$client = null;
+foreach ( $this->clients as $client2) if ( $client2->sock = $sock) $client = $client2;
+if ( tsystem() - $client->lastime > $this->timeout) {
+$this->clientout( $client);
+@socket_close( $client->sock);
+$this->removeclient( $client);
+continue;
+}
+if ( $client) $this->eachloop( $client);
+if ( $client && strlen( $client->outbuffer)) { if ( $client->send()) $client->lastime = tsystem(); }
+if ( $client) { $h = $client->recv(); if ( $h) { $this->receive( $h, $client); $client->lastime = tsystem(); }}
+}
+//echo "loop sock: $sock\n";
+}; if ( $this->usleep) usleep( $this->usleep); }
+socket_close( $this->sock);
+}
+public function clientout( $client) {
+$L = array(); $L2 = array( $this->sock);
+foreach ( $this->clients as $client2) if ( $client2->sock != $client->sock) { lpush( $L, $client2); lpush( $L2, $client2->sock); }
+$this->clients = $L;
+$this->socks = $L2;
+}
+// interface, should extend some of the functions, some may be left alone
+public function timetoquit() { return false; }
+public function newclient( $client) { }
+public function removeclient( $client) { }
+public function eachloop( $client) { }
+public function send( $h, $client) { $client->send( $h); }
+public function receive( $h, $client) { }
 
-// shuts reading on socket
-function ntcpshutread( $sock) { @socket_shutdown( $sock, 0); }
-// shuts writing on socket
-function ntcpshutwrite( $sock) { @socket_shutdown( $sock, 1); }
+}
 
 ?><?php
 // remote, either through web interface or CLI, returns json returned by the call
@@ -5720,468 +5258,7 @@ if ( ! $json) $json = array( 'status' => false, 'msg' => 'unknown error occurred
 return $json;
 }
 
-?><?php
-// functions for lucene-based index creation and its search
-iconv_set_encoding( "input_encoding", "UTF-8");
-iconv_set_encoding( "internal_encoding", "UTF-8");
-iconv_set_encoding( "output_encoding", "UTF-8");
-mb_internal_encoding( "UTF-8");
-if ( is_dir( "/usr/local/zend")) {	// if path does not exist, do not make fuss, just let it me -- lucene is probably not used in these cases
-set_include_path( '/usr/local/zend/library');
-require_once( 'Zend/Search/Lucene.php');
-Zend_Search_Lucene_Search_QueryParser::setDefaultEncoding('UTF-8');
-// analyzers
-//Zend_Search_Lucene_Analysis_Analyzer::setDefault( new Zend_Search_Lucene_Analysis_Analyzer_Common_TextNum_CaseInsensitive());
-//Zend_Search_Lucene_Analysis_Analyzer::setDefault( new Zend_Search_Lucene_Analysis_Analyzer_Common_Utf8());
-//Zend_Search_Lucene_Analysis_Analyzer::setDefault( new Zend_Search_Lucene_Analysis_Analyzer_Common_Utf8Num());
-require_once( "$ABDIR/lib/Utf8MbcsUnigram.php");
-Zend_Search_Lucene_Analysis_Analyzer::setDefault( new Twk_Search_Lucene_Analysis_Analyzer_Common_Utf8MbcsUnigram());
-}
-// definitions for LUCENE field unfolds(type: { addkeys: types}) and field maps (internal: GUI)
-// also manipulations across types of fields and field extensions
-$LFNTYPES = ttl( 'file,string,text,keyword,binary'); // n: native types
-$LFITYPES = ttl( 'text,text,text,keyword,unindexed'); // i: index type (internal to lucene)
-$LFGTYPES = ttl( 'file,input,text,number,binary'); // g: GUI type, handled in web applications
-$LFCLEANS = ttl( 'tags,title,authors,howpublished,keywords');
-$LIDLIST = ttl( 'one,two,three,four,five,six,seven,eight,nine,ten');	// which directories to use for index partitions
-function lfmapa2b( $one, $two) { $h = array(); for ( $i = 0; $i < count( $one); $i++) $h[ $one[ $i]] = $two[ $i]; return $h; }
-function lfmap( $def) { // def should be 'a,b' where a,b from (n,i,g), a cannot be 'i'
-global $LFNTYPES, $LFITYPES, $LFGTYPES;
-extract( lth( ttl( $def), ttl( 'a,b')));
-$a = strtoupper( $a); $b = strtoupper( $b);
-$ak = 'LF' . $a . 'TYPES'; $bk = 'LF' . $b . 'TYPES';
-return lfmapa2b( $$ak, $$bk);
-}
-// when you change unfolds, change lfd**** functions as well -- they add additional keys
-$LFUNFOLD = ttl( 'names=text,count=keyword,body=text,bodylength=keyword,type=text,size=keyword:length=keyword:length=keyword::count=keyword', ':', '', false);
-function lfunfolds() { // returns map { LFNTYPE: { key: LFITYPES}, ...}
-global $LFNTYPES, $LFITYPES, $LFUNFOLD;
-$h = array();
-for ( $i = 0; $i < count( $LFNTYPES); $i++) {
-$k = $LFNTYPES[ $i]; $h[ $k] = array();
-if ( $LFUNFOLD[ $i]) $h[ $k] = tth( $LFUNFOLD[ $i]);
-}
-return $h;
-}
-function lfunfoldone( $name, $ntype, $def = 'n,i') { // return { key: itype}  for all keys, that is nfield + unfolded (extended) keys
-$h = array(); $map = lfmap( $def);
-$h[ $name] = $map[ $ntype];
-$map = lfunfolds();
-foreach ( $map[ $ntype] as $k => $v) $h[ $name . $k] = $v;	// unfolded/extended fields
-return $h;
-}
-function lfunfold( $nfields) { // converts { name: ntype} into { name: itype} extended list
-$h = array();
-foreach ( $nfields as $k => $ntype) { $h2 = lfunfoldone( $k, $ntype); $h = hm( $h, $h2); }
-return $h;
-}
 
-// main index openers/closers, (dir) is absolute path
-function liopen( $dir) {	// return [ $L | null, error]
-$L = null;
-try {
-if ( is_dir( $dir) && count( flget( $dir)))
-$L = new Zend_Search_Lucene( $dir, false);
-else $L = new Zend_Search_Lucene( $dir, true);
-}
-catch ( Zend_Search_Lucene_Exception $e) {
-return array( null, $e->getMessage());
-}
-return array( $L, '');
-}
-function linew( $cdir, $info, $types, $commit = true, $optimize = false) {	// open and close index -- returns newly created document id
-global $LUCENEDIR, $LFCLEANS; $cleans = hvak( $LFCLEANS, true, true);
-list( $L, $msg) = liopen( "$LUCENEDIR/$cdir");
-if ( ! $L) die( "  ERROR! linew() Could not open index at [$LUCENEDIR/$cdir]!\n");
-ldfixbinary( $info, $types);	// fix screwed up binary fields
-$D = new Zend_Search_Lucene_Document();
-//echo "\n\n\n\n";
-foreach ( $info as $k => $v) {
-//if ( $v === '') continue;
-if ( ! isset( $types[ $k])) die( " ERROR! type[$k] is not found in types\n");
-$type = $types[ $k];
-//echo "$k [$type] $v\n";
-if ( isset( $cleans[ $k])) $v = ldclean( $v);
-//echo "$k [$type] " . mb_substr( $v, 0, 100) . "\n";
-if ( $type == 'keyword') ldkeyword( $D, $k, $v);
-if ( $type == 'text') ldtext( $D, $k, $v);
-if ( $type == 'unindexed') ldunindexed( $D, $k, $v);
-}
-@$L->addDocument( $D);
-return liclose( $L, $commit, $optimize) - 1;
-}
-function lipurge( $cdir, $id, $commit = true, $optimize = false) {	// [ true|false, msg], will open and close index
-global $LUCENEDIR; $id = ( int)$id;
-list( $L, $err) = liopen( "$LUCENEDIR/$cdir");
-$L->delete( $id);
-liclose( $L, $commit, $optimize);
-return array( true, 'ok');
-}
-function liclose( $L, $commit = true, $optimize = false) {
-if ( $commit) $L->commit();
-if ( $optimize) $L->optimize();
-$docs = $L->numDocs();
-$count = $L->count();
-unset( $L);
-return $count;
-}
-function lqopen( $dir) { // return $L, no arrays
-try { $L = Zend_Search_Lucene::open( $dir); }
-catch ( Zend_Search_Lucene_Exception $e) { return null; }
-return $L;
-}
-function lqclose( $L, $commit = true, $optimize = true) {
-if ( $commit) $L->commit();
-if ( $optimize) $L->optimize();
-$docs = $L->numDocs();
-unset( $L);
-return $docs;
-}
-
-// information about index and fields
-function lidirs() { // return list of dirs | empty list if error
-global $LUCENEDIR, $LIDLIST;
-$L = array(); foreach ( $LIDLIST as $dir) if ( is_dir( "$LUCENEDIR/$dir")) lpush( $L, $dir);
-return $L;
-}
-function licount( $cdir, $L = null) { // returns count of documents for that cdir
-global $LUCENEDIR;
-if ( ! $L) list( $L2, $msg) = liopen( "$LUCENEDIR/$cdir");
-else $L2 = $L;
-if ( ! $L2) return null;
-$count = $L2->count();
-if ( ! $L) liclose( $L2, false, false);
-return $count;
-}
-function liget() { // returns full info hash from info.json in LUCENEDIR, puts iid key in front
-global $LUCENEDIR;
-$h = @jsonload( "$LUCENEDIR/info.json", true, true); if ( ! $h) return null; // try to open with locking
-$h[ 'fields'] = hm( array( 'iid' => 'keyword'), tth( $h[ 'fields']));
-return $h;
-}
-function liset( &$oh, $donotdosizes = true) { // oh: { iid, fields: { name: type, ...}}
-global $LUCENEDIR;
-$oh[ 'fields'] = htt( $oh[ 'fields']);
-if ( ! $donotdosizes) lisizes( $oh);
-jsondump( $oh, "$LUCENEDIR/info.json", true, true); // write with locking
-}
-function lisizes( &$oh) { 	// sets sizes of all current content directories
-global $LUCENEDIR;
-$dirs = lidirs();
-htouch( $oh, 'sizes');
-foreach ( $dirs as $dir) $oh[ 'sizes'][ $dir] = round( 0.001 * procdu( "$LUCENEDIR/$dir"));	// Mb
-}
-function lfget( $unfold = false, $guinames = false) { 	// when unfold is true: will add additional keys depending on field types
-extract( liget()); 	// iid, fields
-$fields2 = array(); $map = lfmap( $guinames ? 'n,g' : 'n,i');
-$fields2[ 'iid'] = $map[ 'keyword'];		// add iid key no matter what
-foreach ( $fields as $k => $ntype) {
-$fields3 = $unfold ? lfunfoldone( $k, $ntype, $guinames ? 'n,g' : 'n,i') : array( $k => $map[ $ntype]);
-$fields2 = hm( $fields2, $fields3);
-}
-return $fields2;
-}
-
-// doc fields
-function ldkeyword( $D, $k, $v) { $D->addField( Zend_Search_Lucene_Field::Keyword( $k, $v, 'UTF-8'));}
-function ldtext( $D, $k, $v) { $D->addField( Zend_Search_Lucene_Field::Text( $k, $v, 'UTF-8'));}
-function ldunindexed( $D, $k, $v) { $D->addField( Zend_Search_Lucene_Field::UnIndexed( $k, $v, 'UTF-8'));}
-
-// index manipulations, (dir,cdir) always a directory in LUCENEDIR
-// search, $hits is array of objects where files are object variables
-function lq( $dir, $query, $limit = 300, $L = null, $donotclose = false) { // array( $hits | null, [error])
-global $LUCENEDIR;
-$query = mb_strtolower( $query);
-Zend_Search_Lucene::setResultSetLimit( $limit);
-$closewhendone = false; if ( ! $L) $closewhendone = true;
-if ( ! $L) $L = lqopen( "$LUCENEDIR/$dir");
-if ( ! $L) return array( null, "did not find Lucene index in [$dir]");
-$hits = null;
-try { $hits = $L->find( $query);}
-catch ( Zend_Search_Lucene_Exception $e) { return array( null, $e->getMessage()); }
-if ( $closewhendone && ! $donotclose) { lqclose( $L, false, false); $L = null; }	// no commits
-return array( $hits, $L ? $L : null);
-}
-function lqhit2h( $hit) {	// returns array( hash | null, msg | error)
-$fields = lfget( true);	// unfolded itypes
-$h = array(); $h[ 'id'] = $hit->id;
-foreach ( $fields as $k => $t) {
-try { $h[ $k] = @$hit->__get( $k); }
-catch ( Zend_Search_Lucene_Exception $e) { $h[ $k] = ''; }
-}
-return array( $h, null);
-}
-function lqdoc2h( $doc) { // NOTE: no ID for delete, return array( hash | null, msg | error)
-$fields = lfget( true);	// unfolded itypes
-$h = array();
-foreach ( $fields as $k => $t) {
-try { $field = $doc->getField( $k); }
-catch ( Zend_Search_Lucene_Exception $e) { $h[ $k] = ''; }
-// success, read store the value of this field
-$h[ $k] = $field->value;
-}
-return array( $h, null);
-}
-
-
-// formats and conversion mainly used to connect web, backend lucene and backup/restore/fix utilities
-// root: luceneinfo, h: hash, o: outer, i: inner, b: backup
-function leh2o( $info) { // returns new hash in outer format: all non-empty info is base64-ed
-$fields = lfget( true);	// unfolded itypes
-$info2 = $info;
-foreach ( $fields as $k => $t) {
-if ( ! isset( $info2[ $k])) continue;	// ignore missing keys ( edit mode)
-if ( ! strlen( $info2[ $k])) continue;	// nothing to do
-$info2[ $k] = base64_encode( $info2[ $k]);
-}
-return $info2;
-}
-function leo2h( $info) { // will work on any hash, not just outer
-foreach ( $info as $k => $v) if ( strlen( $v)) $info[ $k] = base64_decode( $info[ $k]);
-return $info;
-}
-function leh2i( $info, $oiid = null, $donotdofiles = false, $e = null) { // [ info, fields], allows for fields outside of inner
-global $LUCENEDIR;
-$iinfo = liget(); extract( $iinfo); // iid, fields
-if ( $oiid) $info[ 'iid'] = $oiid;	// iid should be replaced
-if ( ! isset( $info[ 'iid']) ||  ! $info[ 'iid']) { $info[ 'iid'] = $iid; $iinfo[ 'iid']++; liset( $iinfo); } // increment iid for future numbers
-$info2 = array(); $fields2 = array();
-$info2[ 'iid'] = $info[ 'iid']; $fields2[ 'iid'] = 'keyword';
-foreach ( $fields as $k => $ntype) {
-$f = 'lfd' . $ntype; if ( $e) echoe( $e, " leh2i($k=$ntype)");
-list( $info3, $fields3) = $f( $k, $info, $donotdofiles, $e);
-//foreach ( $info3 as $k2 => $v2) echo "$k2 $v2\n";
-$info2 = hm( $info2, $info3); $fields2 = hm( $fields2, $fields3);
-}
-return array( $info2, $fields2, '');
-}
-function leo2i( $info, $oiid = null, $donotdofiles = false) { return leh2i( leo2h( $info), $oiid, $donotdofiles); }
-function lei2h( $info) { return ldo2h( $info); } // will simply base64() non-empty fields
-function lei2b( $info) { // will work with any hash, does not limit keys
-foreach ( $info as $k => $v) if ( strlen( $v)) $info[ $k] = base64_encode( $info[ $k]);
-return $info;
-}
-function leb2i( $info) { return leo2h( $info); }
-function leup( &$info, $h = null) { // updates internal entry's log binary info, updated by reference
-$L = ttl( $info[ 'log'], ' ');
-if ( ! $h) $h = tth( "lastupdate=" . tsystemstamp());	// default log -- lastupdate
-lpush( $L, h2json( $h, true));
-$info[ 'log'] = ltt( $L, ' ');
-$info[ 'logcount'] = count( $L);
-return $info;
-}
-
-
-// each task is spawn using procat and then waited on
-function ltask( $cdir, $type, $info = null, $fields = null, $e = null, $donotwait = false, $donotcheckforerrors = true) {	// returns [ status | prefix, err | ''] -- general task
-global $LUCENEDIR, $LUCENECODEDIR;
-if ( ! is_dir( "$LUCENEDIR/temp")) mkdir( "$LUCENEDIR/temp");
-$h = array(); $prefix = "$LUCENEDIR/temp/" . sprintf( "%s.%s.%d.%d", $cdir, $type, ( int)tsystem(), mr( 10));
-if ( $info) $h[ 'info'] = $info; if ( $fields) $h[ 'fields'] = $fields;
-if ( $info) jsondump( $h, "$prefix.json", true, false);	// force not locking
-$c = "/usr/local/php/bin/php $LUCENECODEDIR/lucene.$type.php $LUCENEDIR $cdir $prefix.json";
-jsondbg( $c);
-procat( "$c > $prefix.log 2>&1 3>&1");
-if ( $donotwait) return array( $prefix, '');	// return immediately, will be monitored separately
-$limit = 100; while ( $limit-- && ! is_file( "$prefix.log")) usleep( 50000);	// wait for the process to start
-if ( ! is_file( "$prefix.log")) { `rm -Rf $prefix.*`; if ( $e) echoe( $e, ''); return array( false, 'failed to start process, maybe ATD service not running?'); }
-$before = tsystem(); while ( tsystem() - $before < 15000 && procpid( $prefix)) {
-if ( $e) echoe( $e, '   ltask(' . tshinterval( tsystem(), $before) . ')');
-usleep( 1000 * mt_rand( 100, 500));
-}
-if ( procpid( $prefix)) { prockill( procpid( $prefix)); `rm -Rf $prefix*`; if ( $e) echoe( $e, ''); return array( false, 'Process still running after 15000 timeout, quit on it...'); }
-$bad = false;
-if ( ! $donotcheckforerrors) foreach ( file( "$prefix.log") as $line) {
-$line = trim( $line); if ( ! $line) continue;
-$line = strtolower( $line);
-$bads = ttl( 'warning,notice,error'); foreach ( $bads as $k) if ( strpos( $k, $line) !== false) {
-if ( ! $bad) $bad = array();
-lpush( $bad, trim( $line));
-break;	// only one hit per line
-}
-
-}
-if ( $bad) { `rm -Rf $prefix*`; return array( false, $bad); } // bad contains warning/error/notice lines
-//if ( $info) `rm -Rf $prefix.json`;	// remove file if one was created previously
-//`rm -Rf $prefix.log`; `rm -Rf $prefix.bz64jsonl`; // remove all possible temp files
-//`rm -Rf $prefix.*`; // all kinds of other files
-if ( $e) echoe( $e, '');
-return array( $prefix, 'ok');
-}
-function ltasksearchgetids( $prefix, $e = null) { // returns [ 'type.id', ...] having parsed the results
-$L = ttl( $prefix, '/', '', false); $prefix = lpop( $L); $dir = ltt( $L, '/');
-$FL = flget( $dir, $prefix, '', 'bz64jsonl'); $h = array();
-foreach ( $FL as $file) {
-$L = ttl( $file, '.'); lpop( $L); $type = llast( $L);
-$in = finopen( "$dir/$file");
-while ( ! findone( $in)) {
-list( $h2, $progress) = finread( $in); if ( ! $h2) continue;
-$id = base64_decode( $h2[ 'id']); lpush( $h, "$type.$id");
-if ( $e) echoe( $e, " $type($progress) $id");
-}
-
-}
-return $h;
-}
-
-// data field and data (file) creators
-function lfdfile( $name, $info2 = array(), $optional = null, $e = null) { // returns [ info, fields]
-$info = array(); $fields = lfunfoldone( $name, 'file', 'n,i');
-foreach ( $fields as $k => $itype) $info[ $k] = ( isset( $info2[ $k]) && $info2[ $k]) ? $info2[ $k] : '';
-$k = $name; $v = $info[ $name];
-$vs = array( '', '', 0, '', 0, '', 0); $ks = hk( $info);
-if ( ! $v) { for ( $i = 0; $i < count( $vs); $i++) $info[ $ks[ $i]] = $vs[ $i]; return array( $info, $fields); }
-$L = ttl( $v, ' ');
-$L2 = array(); foreach ( $L as $v) lpush( $L2, lpop( ttl( $v, '/'))); $info[ $k . 'names'] = ltt( $L2, ' ');
-$info[ $k . 'count'] = count( $L);
-if ( ! $optional) $info[ $k . 'body'] = ldreadfiles( $L, $e); // donotreadfiles = FALSE
-$info[ $k . 'bodylength'] = mb_strlen( $info[ $k . 'body']);
-$L2 = array(); foreach ( $L as $v) lpush( $L2, lpop( ttl( $v, '.'))); $info[ $k . 'type'] = ltt( $L2, ' ');
-$size = 0; foreach ( $L as $file) $size += @filesize( $file); $info[ $k . 'size'] = $size;
-return array( $info, $fields, '');
-}
-function lfdtext( $name, $info2 = array(), $optional = null, $e = null) { // returns [ info, fields]
-$info = array(); $fields = lfunfoldone( $name, 'text', 'n,i');
-foreach ( $fields as $k => $itype) $info[ $k] = ( isset( $info2[ $k]) && $info2[ $k]) ? $info2[ $k] : '';
-$k = $name; $v = $info[ $name];
-$info[ $k] = utf32clean( $v);
-$info[ $k . 'length'] = mb_strlen( $info[ $k]);
-return array( $info, $fields, '');
-}
-function lfdstring( $name, $info2 = array(), $optional = null, $e = null) { return lfdtext( $name, $info2, $optional); }
-function lfdkeyword( $name, $info2 = array(), $optional = null, $e = null) { // returns [ info, fields]
-$info = array(); $fields = lfunfoldone( $name, 'keyword', 'n,i');
-foreach ( $fields as $k => $itype) $info[ $k] = ( isset( $info2[ $k]) && $info2[ $k]) ? $info2[ $k] : '';
-return array( $info, $fields, '');
-}
-function lfdbinary( $name, $info2 = array(), $optional = null, $e = null) { // returns [ info, fields]
-$info = array(); $fields = lfunfoldone( $name, 'binary', 'n,i');
-foreach ( $fields as $k => $itype) $info[ $k] = ( isset( $info2[ $k]) && $info2[ $k]) ? $info2[ $k] : '';
-$k = $name; $info[ $k] = trim( $info[ $k]); $v = $info[ $name];
-$info[ $k . 'count'] = $v ? count( ttl( $v, ' ')) : 0;
-return array( $info, $fields, '');
-}
-
-// file specific functions
-function ldreadfiles( $paths, $e = null) { // returns filebody
-if ( ! $paths) return ''; if ( is_array( $paths)) $paths = ltt( $paths, ' ');
-$L = ttl( $paths, ' '); if ( ! count( $L)) return '';
-$body = '';
-foreach ( $L as $path) {  list( $body2, $err) = ldreadfile( $path); if ( $body2) $body .= '   ' . $body2; }
-if ( ! $body) return '';
-return utf32clean( $body, $e);
-}
-function ldreadfile( $path, $noiconv = false) { // returns [ $body | nothing, error | nothing]
-global $LUCENEDIR;
-if ( ! is_dir( "$LUCENEDIR/temp")) mkdir( "$LUCENEDIR/temp");
-$temp = lpop( ttl( $path, '/')) . '.' . tsystem() . '.txt'; $tempath = "$LUCENEDIR/temp/$temp";
-$ext = strtolower( lpop( ttl( $path, '.')));
-$body = '';
-// call various ext2txt processors and get the body of text
-if ( $ext == 'pdf') {
-$XPDF = '/usr/local/xpdf/bin';
-$enc = 'UTF-8';
-$c = "$XPDF/pdftotext -layout -nopgbrk -eol unix -enc " . strdblquote( $enc) . ' ' . strdblquote( $path) . ' ' . strdblquote( $tempath) . ' > /dev/null 2>/dev/null 3>/dev/null';
-@unlink( $tempath); @system( $c);
-$body = ''; $in = @fopen( $tempath, 'r'); while ( $in && ! feof( $in) && strlen( $body) < 1000000) $body .= fgets( $in); @fclose( $in);
-@unlink( $tempath);
-}
-if ( $ext == 'tex') {
-$detex = '/usr/local/texlive/2010/bin/i386-linux/detex';
-$c = "$detex " . strdblquote( $path) . " > " . strdblquote( $tempath) . " 2> /dev/null 3>/dev/null";
-@unlink( $tempath); @system( $c);
-$body = ''; $in = @fopen( $tempath, 'r');  while ( $in && ! feof( $in)) $body .= fgets( $in); @fclose( $in);
-@unlink( $tempath);
-}
-if ( $ext == 'txt') {
-$body = ''; $in = @fopen( $path, 'r'); while ( $in && ! feof( $in)) $body .= fgets( $in); @fclose( $in);
-}
-if ( $ext == 'html') {
-$body = ''; $in = @fopen( $path, 'r'); while ( $in && ! feof( $in)) $body .= fgets( $in); @fclose( $in);
-$body = strip_tags( $body);	// php function
-}
-return array( $body, '');
-}
-function ldclean( $v) {
-$bads = ':;/'. "'" . '"' . '{}[]'; for ( $i = 0; $i < strlen( $bads); $i++) $v = str_replace( substr( $bads, $i, 1), ' ', $v);
-for ( $i = 0; $i < 10; $i++) $v = str_replace( '  ', ' ', $v);
-$v = trim( $v);	// trim front and trailing spaces
-return $v;
-}
-function ldfixbinary( &$info, $fields) { foreach ( $info as $k => $v) {
-if ( $fields[ $k] != 'unindexed') continue;
-if ( ! trim( $v)) continue;
-$L = ttl( $v, ' '); $L2 = array();
-foreach ( $L as $v) {
-//echo "FIXBINARY h (" . h2json( @json2h( $v, true)) . ")\n";
-$h = @json2h( $v, true); if ( $h && is_array( $h)) { lpush( $L2, $v); continue; }
-$h = @tth( s642s( $v)); if ( $h && is_array( $h)) { lpush( $L2, $v); continue; }
-}
-$info[ $k] = count( $L2) ? ltt( $L2, ' ') : '';
-$info[ $k . 'count'] = $info[ $k] ? count( ttl( $info[ $k], ' ')) : 0;
-}}
-
-?><?php
-// functions for working with pdf files
-// depends on pdftk (split,merge,convert) and xpdf (pdftotext) libraries
-// pdftk is installed through rpms, so, should be in path
-$XPDF = '/usr/local/xpdf/bin';
-function pdf2txt( $path, $enc = 'UTF-8') { // returns text extracted from that pdf
-global $XPDF;
-$c = "$XPDF/pdftotext -enc " . strdblquote( $enc) . ' ' . strdblquote( $path) . ' ' . strdblquote( "$path.txt");
-echo "     c[$c]\n";
-@unlink( "$pdf.txt");
-system( $c);
-$in = @fopen( "$path.txt", 'r');
-$body = ''; while ( $in && ! feof( $in)) $body .= fgets( $in);
-@fclose( $in);
-@unlink( "$path.txt");
-return $body;
-}
-
-?><?php
-
-function cryptCRC24( $bytes) { 	// returns hash digest of the array of bytes
-$L = array(
-0x00000000, 0x00d6a776, 0x00f64557, 0x0020e221, 0x00b78115, 0x00612663, 0x0041c442, 0x00976334,
-0x00340991, 0x00e2aee7, 0x00c24cc6, 0x0014ebb0, 0x00838884, 0x00552ff2, 0x0075cdd3, 0x00a36aa5,
-0x00681322, 0x00beb454, 0x009e5675, 0x0048f103, 0x00df9237, 0x00093541, 0x0029d760, 0x00ff7016,
-0x005c1ab3, 0x008abdc5, 0x00aa5fe4, 0x007cf892, 0x00eb9ba6, 0x003d3cd0, 0x001ddef1, 0x00cb7987,
-0x00d02644, 0x00068132, 0x00266313, 0x00f0c465, 0x0067a751, 0x00b10027, 0x0091e206, 0x00474570,
-0x00e42fd5, 0x003288a3, 0x00126a82, 0x00c4cdf4, 0x0053aec0, 0x008509b6, 0x00a5eb97, 0x00734ce1,
-0x00b83566, 0x006e9210, 0x004e7031, 0x0098d747, 0x000fb473, 0x00d91305, 0x00f9f124, 0x002f5652,
-0x008c3cf7, 0x005a9b81, 0x007a79a0, 0x00acded6, 0x003bbde2, 0x00ed1a94, 0x00cdf8b5, 0x001b5fc3,
-0x00fb4733, 0x002de045, 0x000d0264, 0x00dba512, 0x004cc626, 0x009a6150, 0x00ba8371, 0x006c2407,
-0x00cf4ea2, 0x0019e9d4, 0x00390bf5, 0x00efac83, 0x0078cfb7, 0x00ae68c1, 0x008e8ae0, 0x00582d96,
-0x00935411, 0x0045f367, 0x00651146, 0x00b3b630, 0x0024d504, 0x00f27272, 0x00d29053, 0x00043725,
-0x00a75d80, 0x0071faf6, 0x005118d7, 0x0087bfa1, 0x0010dc95, 0x00c67be3, 0x00e699c2, 0x00303eb4,
-0x002b6177, 0x00fdc601, 0x00dd2420, 0x000b8356, 0x009ce062, 0x004a4714, 0x006aa535, 0x00bc0243,
-0x001f68e6, 0x00c9cf90, 0x00e92db1, 0x003f8ac7, 0x00a8e9f3, 0x007e4e85, 0x005eaca4, 0x00880bd2,
-0x00437255, 0x0095d523, 0x00b53702, 0x00639074, 0x00f4f340, 0x00225436, 0x0002b617, 0x00d41161,
-0x00777bc4, 0x00a1dcb2, 0x00813e93, 0x005799e5, 0x00c0fad1, 0x00165da7, 0x0036bf86, 0x00e018f0,
-0x00ad85dd, 0x007b22ab, 0x005bc08a, 0x008d67fc, 0x001a04c8, 0x00cca3be, 0x00ec419f, 0x003ae6e9,
-0x00998c4c, 0x004f2b3a, 0x006fc91b, 0x00b96e6d, 0x002e0d59, 0x00f8aa2f, 0x00d8480e, 0x000eef78,
-0x00c596ff, 0x00133189, 0x0033d3a8, 0x00e574de, 0x007217ea, 0x00a4b09c, 0x008452bd, 0x0052f5cb,
-0x00f19f6e, 0x00273818, 0x0007da39, 0x00d17d4f, 0x00461e7b, 0x0090b90d, 0x00b05b2c, 0x0066fc5a,
-0x007da399, 0x00ab04ef, 0x008be6ce, 0x005d41b8, 0x00ca228c, 0x001c85fa, 0x003c67db, 0x00eac0ad,
-0x0049aa08, 0x009f0d7e, 0x00bfef5f, 0x00694829, 0x00fe2b1d, 0x00288c6b, 0x00086e4a, 0x00dec93c,
-0x0015b0bb, 0x00c317cd, 0x00e3f5ec, 0x0035529a, 0x00a231ae, 0x007496d8, 0x005474f9, 0x0082d38f,
-0x0021b92a, 0x00f71e5c, 0x00d7fc7d, 0x00015b0b, 0x0096383f, 0x00409f49, 0x00607d68, 0x00b6da1e,
-0x0056c2ee, 0x00806598, 0x00a087b9, 0x007620cf, 0x00e143fb, 0x0037e48d, 0x001706ac, 0x00c1a1da,
-0x0062cb7f, 0x00b46c09, 0x00948e28, 0x0042295e, 0x00d54a6a, 0x0003ed1c, 0x00230f3d, 0x00f5a84b,
-0x003ed1cc, 0x00e876ba, 0x00c8949b, 0x001e33ed, 0x008950d9, 0x005ff7af, 0x007f158e, 0x00a9b2f8,
-0x000ad85d, 0x00dc7f2b, 0x00fc9d0a, 0x002a3a7c, 0x00bd5948, 0x006bfe3e, 0x004b1c1f, 0x009dbb69,
-0x0086e4aa, 0x005043dc, 0x0070a1fd, 0x00a6068b, 0x003165bf, 0x00e7c2c9, 0x00c720e8, 0x0011879e,
-0x00b2ed3b, 0x00644a4d, 0x0044a86c, 0x00920f1a, 0x00056c2e, 0x00d3cb58, 0x00f32979, 0x00258e0f,
-0x00eef788, 0x003850fe, 0x0018b2df, 0x00ce15a9, 0x0059769d, 0x008fd1eb, 0x00af33ca, 0x007994bc,
-0x00dafe19, 0x000c596f, 0x002cbb4e, 0x00fa1c38, 0x006d7f0c, 0x00bbd87a, 0x009b3a5b, 0x004d9d2d
-);
-$key = array();
-foreach ( $bytes as $byte) $key = btail( $key >> 8, 24) ^ $L[ btail( $key ^ $byte, 8)];
-return $key;
-}
-// bytes: [ id/number/int, shift bits, tail bits]
-function cryptbitmap( $bytes) { return btail( $bytes[ 0] >> $bytes[ 1], $bytes[ 2]); } // key = bitwise prefix, bytes are actually numbers
 
 ?><?php
 
@@ -6818,5 +5895,1634 @@ if ( $this->e2) echoe( $this->e2, "   fitness:$id(" . round( $evals[ $id], $this
 }}
 public function abort() { $this->allstop = true; }
 }
+
+?><?php
+/** Copyright (c) 2012, Adam Alexander
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+* Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+* Neither the name of PHP WebSockets nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+class WebSocketUser {
+public $socket;
+public $id;
+public $headers = array();
+public $handshake = false;
+public $handlingPartialPacket = false;
+public $partialBuffer = "";
+public $sendingContinuous = false;
+public $partialMessage = "";
+public $hasSentClose = false;
+// streaming support
+public $in = null;
+public $pos;
+public $blocksize;
+public $step;
+public $lastpos;
+public $lastime = 0;
+function __construct($id,$socket) { $this->id = $id; $this->socket = $socket; }
+}
+// simple server, all sockets are blocking
+abstract class WebSocketServer {
+protected $userClass = 'WebSocketUser'; // redefine this if you want a custom user class.  The custom user class should inherit from WebSocketUser.
+protected $maxBufferSize;
+protected $master;
+protected $sockets                              = array();
+protected $users                                = array();
+protected $interactive                          = true;
+protected $headerOriginRequired                 = false;
+protected $headerSecWebSocketProtocolRequired   = false;
+protected $headerSecWebSocketExtensionsRequired = false;
+
+function __construct($addr, $port, $bufferLength = 2048) {
+$this->maxBufferSize = $bufferLength;
+$this->master = socket_create(AF_INET, SOCK_STREAM, SOL_TCP)  or die("Failed: socket_create()");
+socket_set_option($this->master, SOL_SOCKET, SO_REUSEADDR, 1) or die("Failed: socket_option()");
+socket_bind($this->master, $addr, $port)                      or die("Failed: socket_bind()");
+socket_listen($this->master,20)                               or die("Failed: socket_listen()");
+$this->sockets[] = $this->master;
+$this->stdout("Server started\nListening on: $addr:$port\nMaster socket: ".$this->master);
+while( true) {
+if ( empty($this->sockets)) {
+$this->sockets[] = $master;
+}
+$read = $this->sockets;
+$write = $except = null;
+@socket_select($read,$write,$except,null);
+foreach ($read as $socket) {
+if ($socket == $this->master) {
+$client = socket_accept($socket);
+if ($client < 0) {
+$this->stderr("Failed: socket_accept()");
+continue;
+} else {
+$this->connect($client);
+}
+} else {
+$numBytes = @socket_recv($socket,$buffer,$this->maxBufferSize,0); // todo: if($numBytes === false) { error handling } elseif ($numBytes === 0) { remote client disconected }
+if ($numBytes == 0) {
+$this->disconnect($socket);
+} else {
+$user = $this->getUserBySocket($socket);
+if (!$user->handshake) {
+$this->doHandshake($user,$buffer);
+} else {
+if ($message = $this->deframe($buffer, $user)) {
+$this->process($user, mb_convert_encoding($message, 'UTF-8'));
+if($user->hasSentClose) {
+$this->disconnect($user->socket);
+}
+} else {
+do {
+$numByte = @socket_recv($socket,$buffer,$this->maxBufferSize,MSG_PEEK);
+if ($numByte > 0) {
+$numByte = @socket_recv($socket,$buffer,$this->maxBufferSize,0);
+if ($message = $this->deframe($buffer,$user)) {
+$this->process($user,$message);
+if($user->hasSentClose) {
+$this->disconnect($user->socket);
+}
+}
+}
+} while($numByte > 0);
+}
+}
+}
+}
+}
+}
+
+}
+
+abstract protected function process($user,$message); // Calked immediately when the data is recieved.
+abstract protected function connected($user);        // Called after the handshake response is sent to the client.
+abstract protected function closed($user);           // Called after the connection is closed.
+
+protected function connecting($user) {
+// Override to handle a connecting user, after the instance of the User is created, but before
+// the handshake has completed.
+}
+
+protected function send($user,$message,$type='text') {
+//$this->stdout("> $message");
+$message = $this->frame($message,$user, $type);
+socket_write($user->socket,$message,strlen($message));
+}
+
+protected function connect($socket) {
+$user = new $this->userClass(uniqid(),$socket);
+array_push($this->users,$user);
+array_push($this->sockets,$socket);
+$this->connecting($user);
+}
+
+protected function disconnect($socket,$triggerClosed=true) {
+$foundUser = null;
+$foundSocket = null;
+foreach ($this->users as $key => $user) {
+if ($user->socket == $socket) {
+$foundUser = $key;
+$disconnectedUser = $user;
+break;
+}
+}
+if ($foundUser !== null) {
+unset($this->users[$foundUser]);
+$this->users = array_values($this->users);
+}
+foreach ($this->sockets as $key => $sock) {
+if ($sock == $socket) {
+$foundSocket = $key;
+break;
+}
+}
+if ($foundSocket !== null) {
+unset($this->sockets[$foundSocket]);
+$this->sockets = array_values($this->sockets);
+}
+if ($triggerClosed) {
+$this->closed($disconnectedUser);
+}
+}
+
+protected function doHandshake($user, $buffer) {
+$magicGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+$headers = array();
+$lines = explode("\n",$buffer);
+foreach ($lines as $line) {
+if (strpos($line,":") !== false) {
+$header = explode(":",$line,2);
+$headers[strtolower(trim($header[0]))] = trim($header[1]);
+} else if (stripos($line,"get ") !== false) {
+preg_match("/GET (.*) HTTP/i", $buffer, $reqResource);
+$headers['get'] = trim($reqResource[1]);
+}
+}
+if (isset($headers['get'])) {
+$user->requestedResource = $headers['get'];
+} else {
+// todo: fail the connection
+$handshakeResponse = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
+}
+if (!isset($headers['host']) || !$this->checkHost($headers['host'])) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+if (!isset($headers['upgrade']) || strtolower($headers['upgrade']) != 'websocket') {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+if (!isset($headers['connection']) || strpos(strtolower($headers['connection']), 'upgrade') === FALSE) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+if (!isset($headers['sec-websocket-key'])) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+} else {
+
+}
+if (!isset($headers['sec-websocket-version']) || strtolower($headers['sec-websocket-version']) != 13) {
+$handshakeResponse = "HTTP/1.1 426 Upgrade Required\r\nSec-WebSocketVersion: 13";
+}
+if (($this->headerOriginRequired && !isset($headers['origin']) ) || ($this->headerOriginRequired && !$this->checkOrigin($headers['origin']))) {
+$handshakeResponse = "HTTP/1.1 403 Forbidden";
+}
+if (($this->headerSecWebSocketProtocolRequired && !isset($headers['sec-websocket-protocol'])) || ($this->headerSecWebSocketProtocolRequired && !$this->checkWebsocProtocol($header['sec-websocket-protocol']))) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+if (($this->headerSecWebSocketExtensionsRequired && !isset($headers['sec-websocket-extensions'])) || ($this->headerSecWebSocketExtensionsRequired && !$this->checkWebsocExtensions($header['sec-websocket-extensions']))) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+
+// Done verifying the _required_ headers and optionally required headers.
+
+if (isset($handshakeResponse)) {
+socket_write($user->socket,$handshakeResponse,strlen($handshakeResponse));
+$this->disconnect($user->socket);
+return false;
+}
+
+$user->headers = $headers;
+$user->handshake = $buffer;
+
+$webSocketKeyHash = sha1($headers['sec-websocket-key'] . $magicGUID);
+
+$rawToken = "";
+for ($i = 0; $i < 20; $i++) {
+$rawToken .= chr(hexdec(substr($webSocketKeyHash,$i*2, 2)));
+}
+$handshakeToken = base64_encode($rawToken) . "\r\n";
+
+$subProtocol = (isset($headers['sec-websocket-protocol'])) ? $this->processProtocol($headers['sec-websocket-protocol']) : "";
+$extensions = (isset($headers['sec-websocket-extensions'])) ? $this->processExtensions($headers['sec-websocket-extensions']) : "";
+
+$handshakeResponse = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: $handshakeToken$subProtocol$extensions\r\n";
+socket_write($user->socket,$handshakeResponse,strlen($handshakeResponse));
+$this->connected($user);
+}
+
+protected function checkHost($hostName) {
+return true; // Override and return false if the host is not one that you would expect.
+// Ex: You only want to accept hosts from the my-domain.com domain,
+// but you receive a host from malicious-site.com instead.
+}
+
+protected function checkOrigin($origin) {
+return true; // Override and return false if the origin is not one that you would expect.
+}
+
+protected function checkWebsocProtocol($protocol) {
+return true; // Override and return false if a protocol is not found that you would expect.
+}
+
+protected function checkWebsocExtensions($extensions) {
+return true; // Override and return false if an extension is not found that you would expect.
+}
+
+protected function processProtocol($protocol) {
+return ""; // return either "Sec-WebSocket-Protocol: SelectedProtocolFromClientList\r\n" or return an empty string.
+// The carriage return/newline combo must appear at the end of a non-empty string, and must not
+// appear at the beginning of the string nor in an otherwise empty string, or it will be considered part of
+// the response body, which will trigger an error in the client as it will not be formatted correctly.
+}
+
+protected function processExtensions($extensions) {
+return ""; // return either "Sec-WebSocket-Extensions: SelectedExtensions\r\n" or return an empty string.
+}
+
+protected function getUserBySocket($socket) {
+foreach ($this->users as $user) {
+if ($user->socket == $socket) {
+return $user;
+}
+}
+return null;
+}
+
+protected function stdout($message) {
+if ($this->interactive) {
+echo "$message\n";
+}
+}
+
+protected function stderr($message) {
+if ($this->interactive) {
+echo "$message\n";
+}
+}
+
+protected function frame($message, $user, $messageType='text', $messageContinues=false) {
+switch ($messageType) {
+case 'continuous':
+$b1 = 0;
+break;
+case 'text':
+$b1 = ($user->sendingContinuous) ? 0 : 1;
+break;
+case 'binary':
+$b1 = ($user->sendingContinuous) ? 0 : 2;
+break;
+case 'close':
+$b1 = 8;
+break;
+case 'ping':
+$b1 = 9;
+break;
+case 'pong':
+$b1 = 10;
+break;
+}
+if ($messageContinues) {
+$user->sendingContinuous = true;
+} else {
+$b1 += 128;
+$user->sendingContinuous = false;
+}
+
+$length = strlen($message);
+$lengthField = "";
+if ($length < 126) {
+$b2 = $length;
+} elseif ($length <= 65536) {
+$b2 = 126;
+$hexLength = dechex($length);
+//$this->stdout("Hex Length: $hexLength");
+if (strlen($hexLength)%2 == 1) {
+$hexLength = '0' . $hexLength;
+}
+$n = strlen($hexLength) - 2;
+
+for ($i = $n; $i >= 0; $i=$i-2) {
+$lengthField = chr(hexdec(substr($hexLength, $i, 2))) . $lengthField;
+}
+while (strlen($lengthField) < 2) {
+$lengthField = chr(0) . $lengthField;
+}
+} else {
+$b2 = 127;
+$hexLength = dechex($length);
+if (strlen($hexLength)%2 == 1) {
+$hexLength = '0' . $hexLength;
+}
+$n = strlen($hexLength) - 2;
+
+for ($i = $n; $i >= 0; $i=$i-2) {
+$lengthField = chr(hexdec(substr($hexLength, $i, 2))) . $lengthField;
+}
+while (strlen($lengthField) < 8) {
+$lengthField = chr(0) . $lengthField;
+}
+}
+
+return chr($b1) . chr($b2) . $lengthField . $message;
+}
+
+protected function deframe($message, $user) {
+//echo $this->strtohex($message);
+$headers = $this->extractHeaders($message);
+$pongReply = false;
+$willClose = false;
+switch($headers['opcode']) {
+case 0:
+case 1:
+case 2:
+break;
+case 8:
+// todo: close the connection
+$user->hasSentClose = true;
+return "";
+case 9:
+$pongReply = true;
+case 10:
+break;
+default:
+//$this->disconnect($user); // todo: fail connection
+$willClose = true;
+break;
+}
+
+if ($user->handlingPartialPacket) {
+$message = $user->partialBuffer . $message;
+$user->handlingPartialPacket = false;
+return $this->deframe($message, $user);
+}
+
+if ($this->checkRSVBits($headers,$user)) {
+return false;
+}
+
+if ($willClose) {
+// todo: fail the connection
+return false;
+}
+
+$payload = $user->partialMessage . $this->extractPayload($message,$headers);
+
+if ($pongReply) {
+$reply = $this->frame($payload,$user,'pong');
+socket_write($user->socket,$reply,strlen($reply));
+return false;
+}
+if (extension_loaded('mbstring')) {
+if ($headers['length'] > mb_strlen($payload)) {
+$user->handlingPartialPacket = true;
+$user->partialBuffer = $message;
+return false;
+}
+} else {
+if ($headers['length'] > strlen($payload)) {
+$user->handlingPartialPacket = true;
+$user->partialBuffer = $message;
+return false;
+}
+}
+
+$payload = $this->applyMask($headers,$payload);
+
+if ($headers['fin']) {
+$user->partialMessage = "";
+return $payload;
+}
+$user->partialMessage = $payload;
+return false;
+}
+
+protected function extractHeaders($message) {
+$header = array('fin'     => $message[0] & chr(128),
+'rsv1'    => $message[0] & chr(64),
+'rsv2'    => $message[0] & chr(32),
+'rsv3'    => $message[0] & chr(16),
+'opcode'  => ord($message[0]) & 15,
+'hasmask' => $message[1] & chr(128),
+'length'  => 0,
+'mask'    => "");
+$header['length'] = (ord($message[1]) >= 128) ? ord($message[1]) - 128 : ord($message[1]);
+
+if ($header['length'] == 126) {
+if ($header['hasmask']) {
+$header['mask'] = $message[4] . $message[5] . $message[6] . $message[7];
+}
+$header['length'] = ord($message[2]) * 256
++ ord($message[3]);
+} elseif ($header['length'] == 127) {
+if ($header['hasmask']) {
+$header['mask'] = $message[10] . $message[11] . $message[12] . $message[13];
+}
+$header['length'] = ord($message[2]) * 65536 * 65536 * 65536 * 256
++ ord($message[3]) * 65536 * 65536 * 65536
++ ord($message[4]) * 65536 * 65536 * 256
++ ord($message[5]) * 65536 * 65536
++ ord($message[6]) * 65536 * 256
++ ord($message[7]) * 65536
++ ord($message[8]) * 256
++ ord($message[9]);
+} elseif ($header['hasmask']) {
+$header['mask'] = $message[2] . $message[3] . $message[4] . $message[5];
+}
+//echo $this->strtohex($message);
+//$this->printHeaders($header);
+return $header;
+}
+
+protected function extractPayload($message,$headers) {
+$offset = 2;
+if ($headers['hasmask']) {
+$offset += 4;
+}
+if ($headers['length'] > 65535) {
+$offset += 8;
+} elseif ($headers['length'] > 125) {
+$offset += 2;
+}
+return substr($message,$offset);
+}
+
+protected function applyMask($headers,$payload) {
+$effectiveMask = "";
+if ($headers['hasmask']) {
+$mask = $headers['mask'];
+} else {
+return $payload;
+}
+
+while (strlen($effectiveMask) < strlen($payload)) {
+$effectiveMask .= $mask;
+}
+while (strlen($effectiveMask) > strlen($payload)) {
+$effectiveMask = substr($effectiveMask,0,-1);
+}
+return $effectiveMask ^ $payload;
+}
+protected function checkRSVBits($headers,$user) { // override this method if you are using an extension where the RSV bits are used.
+if (ord($headers['rsv1']) + ord($headers['rsv2']) + ord($headers['rsv3']) > 0) {
+//$this->disconnect($user); // todo: fail connection
+return true;
+}
+return false;
+}
+
+protected function strtohex($str) {
+$strout = "";
+for ($i = 0; $i < strlen($str); $i++) {
+$strout .= (ord($str[$i])<16) ? "0" . dechex(ord($str[$i])) : dechex(ord($str[$i]));
+$strout .= " ";
+if ($i%32 == 7) {
+$strout .= ": ";
+}
+if ($i%32 == 15) {
+$strout .= ": ";
+}
+if ($i%32 == 23) {
+$strout .= ": ";
+}
+if ($i%32 == 31) {
+$strout .= "\n";
+}
+}
+return $strout . "\n";
+}
+
+protected function printHeaders($headers) {
+echo "Array\n(\n";
+foreach ($headers as $key => $value) {
+if ($key == 'length' || $key == 'opcode') {
+echo "\t[$key] => $value\n\n";
+} else {
+echo "\t[$key] => ".$this->strtohex($value)."\n";
+
+}
+
+}
+echo ")\n";
+}
+}
+// streaming server, all sockets are non-blocking
+abstract class WebSocketServerStreaming {
+protected $userClass = 'WebSocketUser'; // redefine this if you want a custom user class.  The custom user class should inherit from WebSocketUser.
+protected $maxBufferSize;
+protected $master;
+protected $sockets                              = array();
+protected $users                                = array();
+protected $interactive                          = true;
+protected $headerOriginRequired                 = false;
+protected $headerSecWebSocketProtocolRequired   = false;
+protected $headerSecWebSocketExtensionsRequired = false;
+function __construct($addr, $port, $bufferLength = 2048) {
+$this->maxBufferSize = $bufferLength;
+$this->master = socket_create(AF_INET, SOCK_STREAM, SOL_TCP)  or die("Failed: socket_create()");
+socket_set_option($this->master, SOL_SOCKET, SO_REUSEADDR, 1) or die("Failed: socket_option()");
+socket_set_nonblock( $this->master);
+socket_bind($this->master, $addr, $port)                      or die("Failed: socket_bind()");
+socket_listen($this->master,20)                               or die("Failed: socket_listen()");
+$this->sockets[] = $this->master;
+$this->stdout("Server started\nListening on: $addr:$port\nMaster socket: ".$this->master);
+while( true) {
+if ( empty( $this->sockets)) $this->sockets[] = $master;
+$read = $this->sockets;
+$write = $except = null;
+//@socket_select( $read, $write, $except, 0);
+foreach ( $read as $socket) {
+//echo "B1 sock($socket)\n";
+// call round robin for existing users
+if ( $socket != $this->master) {
+//echo "B2 sock($socket)\n";
+$user = $this->getUserBySocket( $socket);
+if ( $user->handshake && $user->in) { if ( ! $this->tx( $user)) { $this->disconnect( $user->socket); continue; } }
+}
+//echo "B3\n";
+// check for new sockets
+if ( $socket == $this->master) {
+//echo "B4\n";
+$client = @socket_accept( $socket);
+if ( $client <= 0) continue;
+socket_set_nonblock( $client);
+$this->connect( $client);
+}
+else {
+//echo "B5\n";
+$numBytes = @socket_recv( $socket, $buffer, $this->maxBufferSize,0); // todo: if($numBytes === false) { error handling } elseif ($numBytes === 0) { remote client disconected }
+if ( $numBytes <= 0) continue;
+$user = $this->getUserBySocket( $socket);
+if ( ! $user->handshake) { $this->doHandshake($user,$buffer); continue; }
+if ( $message = $this->deframe( $buffer, $user)) {
+//echo "B6\n";
+$this->rx( $user, mb_convert_encoding( $message, 'UTF-8'));
+//echo "B6b\n";
+if ( $user->hasSentClose) $this->disconnect( $user->socket);
+//echo "B6c\n";
+continue;
+}
+//echo "Bpre7\n";
+do {
+//echo "socket.rx\n";
+//echo "B7\n";
+$numByte = @socket_recv($socket,$buffer,$this->maxBufferSize,MSG_PEEK);
+if ( $numByte > 0) {
+//echo "B8a\n";
+$numByte = @socket_recv( $socket, $buffer, $this->maxBufferSize, 0);
+if ( $message = $this->deframe( $buffer, $user)) {
+//echo "B8b\n";
+$this->rx( $user, $message);
+if ( $user->hasSentClose) $this->disconnect($user->socket);
+}
+
+}
+
+} while( $numByte > 0);
+
+}
+
+}
+
+}
+
+}
+abstract protected function rx( $user, $message); // Calked immediately when the data is recieved.
+abstract protected function tx( $user); // Calked immediately when the data is recieved.
+abstract protected function connected($user);        // Called after the handshake response is sent to the client.
+abstract protected function closed($user);           // Called after the connection is closed.
+
+protected function connecting($user) {
+// Override to handle a connecting user, after the instance of the User is created, but before
+// the handshake has completed.
+}
+
+protected function send( $user, $message, $type = 'text') {
+//$this->stdout("> $message");
+$message = $this->frame( $message, $user, $type);
+while ( strlen( $message)) {
+$bytes = @socket_write( $user->socket, $message, strlen( $message));
+$message = substr( $message, $bytes);
+}
+
+}
+
+protected function connect($socket) {
+$user = new $this->userClass(uniqid(),$socket);
+array_push($this->users,$user);
+array_push($this->sockets,$socket);
+$this->connecting($user);
+}
+
+protected function disconnect($socket,$triggerClosed=true) {
+$foundUser = null;
+$foundSocket = null;
+$disconnectedUser = false;
+foreach ($this->users as $key => $user) {
+if ($user->socket == $socket) {
+$foundUser = $key;
+$disconnectedUser = $user;
+break;
+}
+}
+if ($foundUser !== null) {
+unset($this->users[$foundUser]);
+$this->users = array_values($this->users);
+}
+foreach ($this->sockets as $key => $sock) {
+if ($sock == $socket) {
+$foundSocket = $key;
+break;
+}
+}
+if ($foundSocket !== null) {
+unset($this->sockets[$foundSocket]);
+$this->sockets = array_values($this->sockets);
+}
+if ($triggerClosed && $disconnectedUser) $this->closed($disconnectedUser);
+}
+
+protected function doHandshake($user, $buffer) {
+$magicGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+$headers = array();
+$lines = explode("\n",$buffer);
+foreach ($lines as $line) {
+if (strpos($line,":") !== false) {
+$header = explode(":",$line,2);
+$headers[strtolower(trim($header[0]))] = trim($header[1]);
+} else if (stripos($line,"get ") !== false) {
+preg_match("/GET (.*) HTTP/i", $buffer, $reqResource);
+$headers['get'] = trim($reqResource[1]);
+}
+}
+if (isset($headers['get'])) {
+$user->requestedResource = $headers['get'];
+} else {
+// todo: fail the connection
+$handshakeResponse = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
+}
+if (!isset($headers['host']) || !$this->checkHost($headers['host'])) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+if (!isset($headers['upgrade']) || strtolower($headers['upgrade']) != 'websocket') {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+if (!isset($headers['connection']) || strpos(strtolower($headers['connection']), 'upgrade') === FALSE) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+if (!isset($headers['sec-websocket-key'])) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+} else {
+
+}
+if (!isset($headers['sec-websocket-version']) || strtolower($headers['sec-websocket-version']) != 13) {
+$handshakeResponse = "HTTP/1.1 426 Upgrade Required\r\nSec-WebSocketVersion: 13";
+}
+if (($this->headerOriginRequired && !isset($headers['origin']) ) || ($this->headerOriginRequired && !$this->checkOrigin($headers['origin']))) {
+$handshakeResponse = "HTTP/1.1 403 Forbidden";
+}
+if (($this->headerSecWebSocketProtocolRequired && !isset($headers['sec-websocket-protocol'])) || ($this->headerSecWebSocketProtocolRequired && !$this->checkWebsocProtocol($header['sec-websocket-protocol']))) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+if (($this->headerSecWebSocketExtensionsRequired && !isset($headers['sec-websocket-extensions'])) || ($this->headerSecWebSocketExtensionsRequired && !$this->checkWebsocExtensions($header['sec-websocket-extensions']))) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+
+// Done verifying the _required_ headers and optionally required headers.
+
+if (isset($handshakeResponse)) {
+socket_write($user->socket,$handshakeResponse,strlen($handshakeResponse));
+$this->disconnect($user->socket);
+return false;
+}
+
+$user->headers = $headers;
+$user->handshake = $buffer;
+
+$webSocketKeyHash = sha1($headers['sec-websocket-key'] . $magicGUID);
+
+$rawToken = "";
+for ($i = 0; $i < 20; $i++) {
+$rawToken .= chr(hexdec(substr($webSocketKeyHash,$i*2, 2)));
+}
+$handshakeToken = base64_encode($rawToken) . "\r\n";
+
+$subProtocol = (isset($headers['sec-websocket-protocol'])) ? $this->processProtocol($headers['sec-websocket-protocol']) : "";
+$extensions = (isset($headers['sec-websocket-extensions'])) ? $this->processExtensions($headers['sec-websocket-extensions']) : "";
+
+$handshakeResponse = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: $handshakeToken$subProtocol$extensions\r\n";
+socket_write($user->socket,$handshakeResponse,strlen($handshakeResponse));
+$this->connected($user);
+}
+
+protected function checkHost($hostName) {
+return true; // Override and return false if the host is not one that you would expect.
+// Ex: You only want to accept hosts from the my-domain.com domain,
+// but you receive a host from malicious-site.com instead.
+}
+
+protected function checkOrigin($origin) {
+return true; // Override and return false if the origin is not one that you would expect.
+}
+
+protected function checkWebsocProtocol($protocol) {
+return true; // Override and return false if a protocol is not found that you would expect.
+}
+
+protected function checkWebsocExtensions($extensions) {
+return true; // Override and return false if an extension is not found that you would expect.
+}
+
+protected function processProtocol($protocol) {
+return ""; // return either "Sec-WebSocket-Protocol: SelectedProtocolFromClientList\r\n" or return an empty string.
+// The carriage return/newline combo must appear at the end of a non-empty string, and must not
+// appear at the beginning of the string nor in an otherwise empty string, or it will be considered part of
+// the response body, which will trigger an error in the client as it will not be formatted correctly.
+}
+
+protected function processExtensions($extensions) {
+return ""; // return either "Sec-WebSocket-Extensions: SelectedExtensions\r\n" or return an empty string.
+}
+
+protected function getUserBySocket($socket) {
+foreach ($this->users as $user) {
+if ($user->socket == $socket) {
+return $user;
+}
+}
+return null;
+}
+
+protected function stdout($message) {
+if ($this->interactive) {
+echo "$message\n";
+}
+}
+
+protected function stderr($message) {
+if ($this->interactive) {
+echo "$message\n";
+}
+}
+
+protected function frame($message, $user, $messageType='text', $messageContinues=false) {
+switch ($messageType) {
+case 'continuous':
+$b1 = 0;
+break;
+case 'text':
+$b1 = ($user->sendingContinuous) ? 0 : 1;
+break;
+case 'binary':
+$b1 = ($user->sendingContinuous) ? 0 : 2;
+break;
+case 'close':
+$b1 = 8;
+break;
+case 'ping':
+$b1 = 9;
+break;
+case 'pong':
+$b1 = 10;
+break;
+}
+if ($messageContinues) {
+$user->sendingContinuous = true;
+} else {
+$b1 += 128;
+$user->sendingContinuous = false;
+}
+
+$length = strlen($message);
+$lengthField = "";
+if ($length < 126) {
+$b2 = $length;
+} elseif ($length <= 65536) {
+$b2 = 126;
+$hexLength = dechex($length);
+//$this->stdout("Hex Length: $hexLength");
+if (strlen($hexLength)%2 == 1) {
+$hexLength = '0' . $hexLength;
+}
+$n = strlen($hexLength) - 2;
+
+for ($i = $n; $i >= 0; $i=$i-2) {
+$lengthField = chr(hexdec(substr($hexLength, $i, 2))) . $lengthField;
+}
+while (strlen($lengthField) < 2) {
+$lengthField = chr(0) . $lengthField;
+}
+} else {
+$b2 = 127;
+$hexLength = dechex($length);
+if (strlen($hexLength)%2 == 1) {
+$hexLength = '0' . $hexLength;
+}
+$n = strlen($hexLength) - 2;
+
+for ($i = $n; $i >= 0; $i=$i-2) {
+$lengthField = chr(hexdec(substr($hexLength, $i, 2))) . $lengthField;
+}
+while (strlen($lengthField) < 8) {
+$lengthField = chr(0) . $lengthField;
+}
+}
+
+return chr($b1) . chr($b2) . $lengthField . $message;
+}
+
+protected function deframe($message, $user) {
+//echo $this->strtohex($message);
+$headers = $this->extractHeaders($message);
+$pongReply = false;
+$willClose = false;
+switch($headers['opcode']) {
+case 0:
+case 1:
+case 2:
+break;
+case 8:
+// todo: close the connection
+$user->hasSentClose = true;
+return "";
+case 9:
+$pongReply = true;
+case 10:
+break;
+default:
+//$this->disconnect($user); // todo: fail connection
+$willClose = true;
+break;
+}
+
+if ($user->handlingPartialPacket) {
+$message = $user->partialBuffer . $message;
+$user->handlingPartialPacket = false;
+return $this->deframe($message, $user);
+}
+
+if ($this->checkRSVBits($headers,$user)) {
+return false;
+}
+
+if ($willClose) {
+// todo: fail the connection
+return false;
+}
+
+$payload = $user->partialMessage . $this->extractPayload($message,$headers);
+
+if ($pongReply) {
+$reply = $this->frame($payload,$user,'pong');
+socket_write($user->socket,$reply,strlen($reply));
+return false;
+}
+if (extension_loaded('mbstring')) {
+if ($headers['length'] > mb_strlen($payload)) {
+$user->handlingPartialPacket = true;
+$user->partialBuffer = $message;
+return false;
+}
+} else {
+if ($headers['length'] > strlen($payload)) {
+$user->handlingPartialPacket = true;
+$user->partialBuffer = $message;
+return false;
+}
+}
+
+$payload = $this->applyMask($headers,$payload);
+
+if ($headers['fin']) {
+$user->partialMessage = "";
+return $payload;
+}
+$user->partialMessage = $payload;
+return false;
+}
+
+protected function extractHeaders($message) {
+$header = array('fin'     => $message[0] & chr(128),
+'rsv1'    => $message[0] & chr(64),
+'rsv2'    => $message[0] & chr(32),
+'rsv3'    => $message[0] & chr(16),
+'opcode'  => ord($message[0]) & 15,
+'hasmask' => $message[1] & chr(128),
+'length'  => 0,
+'mask'    => "");
+$header['length'] = (ord($message[1]) >= 128) ? ord($message[1]) - 128 : ord($message[1]);
+
+if ($header['length'] == 126) {
+if ($header['hasmask']) {
+$header['mask'] = $message[4] . $message[5] . $message[6] . $message[7];
+}
+$header['length'] = ord($message[2]) * 256
++ ord($message[3]);
+} elseif ($header['length'] == 127) {
+if ($header['hasmask']) {
+$header['mask'] = $message[10] . $message[11] . $message[12] . $message[13];
+}
+$header['length'] = ord($message[2]) * 65536 * 65536 * 65536 * 256
++ ord($message[3]) * 65536 * 65536 * 65536
++ ord($message[4]) * 65536 * 65536 * 256
++ ord($message[5]) * 65536 * 65536
++ ord($message[6]) * 65536 * 256
++ ord($message[7]) * 65536
++ ord($message[8]) * 256
++ ord($message[9]);
+} elseif ($header['hasmask']) {
+$header['mask'] = $message[2] . $message[3] . $message[4] . $message[5];
+}
+//echo $this->strtohex($message);
+//$this->printHeaders($header);
+return $header;
+}
+
+protected function extractPayload($message,$headers) {
+$offset = 2;
+if ($headers['hasmask']) {
+$offset += 4;
+}
+if ($headers['length'] > 65535) {
+$offset += 8;
+} elseif ($headers['length'] > 125) {
+$offset += 2;
+}
+return substr($message,$offset);
+}
+
+protected function applyMask($headers,$payload) {
+$effectiveMask = "";
+if ($headers['hasmask']) {
+$mask = $headers['mask'];
+} else {
+return $payload;
+}
+
+while (strlen($effectiveMask) < strlen($payload)) {
+$effectiveMask .= $mask;
+}
+while (strlen($effectiveMask) > strlen($payload)) {
+$effectiveMask = substr($effectiveMask,0,-1);
+}
+return $effectiveMask ^ $payload;
+}
+protected function checkRSVBits($headers,$user) { // override this method if you are using an extension where the RSV bits are used.
+if (ord($headers['rsv1']) + ord($headers['rsv2']) + ord($headers['rsv3']) > 0) {
+//$this->disconnect($user); // todo: fail connection
+return true;
+}
+return false;
+}
+
+protected function strtohex($str) {
+$strout = "";
+for ($i = 0; $i < strlen($str); $i++) {
+$strout .= (ord($str[$i])<16) ? "0" . dechex(ord($str[$i])) : dechex(ord($str[$i]));
+$strout .= " ";
+if ($i%32 == 7) {
+$strout .= ": ";
+}
+if ($i%32 == 15) {
+$strout .= ": ";
+}
+if ($i%32 == 23) {
+$strout .= ": ";
+}
+if ($i%32 == 31) {
+$strout .= "\n";
+}
+}
+return $strout . "\n";
+}
+
+protected function printHeaders($headers) {
+echo "Array\n(\n";
+foreach ($headers as $key => $value) {
+if ($key == 'length' || $key == 'opcode') {
+echo "\t[$key] => $value\n\n";
+} else {
+echo "\t[$key] => ".$this->strtohex($value)."\n";
+
+}
+
+}
+echo ")\n";
+}
+}
+// streaming server, all sockets are non-blocking
+abstract class WebSocketServerStreamingWithFork {
+protected $userClass = 'WebSocketUser'; // redefine this if you want a custom user class.  The custom user class should inherit from WebSocketUser.
+protected $maxBufferSize;
+protected $timeout = 300;
+protected $master;
+protected $sockets                              = array();
+protected $users                                = array();
+protected $interactive                          = true;
+protected $headerOriginRequired                 = false;
+protected $headerSecWebSocketProtocolRequired   = false;
+protected $headerSecWebSocketExtensionsRequired = false;
+function __construct( $addr, $port, $bufferLength = 2048, $timeout = 300) {
+$this->maxBufferSize = $bufferLength;
+$this->timeout = $timeout;
+$this->master = socket_create(AF_INET, SOCK_STREAM, SOL_TCP)  or die("Failed: socket_create()");
+socket_set_option($this->master, SOL_SOCKET, SO_REUSEADDR, 1) or die("Failed: socket_option()");
+socket_set_nonblock( $this->master);
+socket_bind($this->master, $addr, $port)                      or die("Failed: socket_bind()");
+socket_listen($this->master,20)                               or die("Failed: socket_listen()");
+$this->sockets[] = $this->master;
+echo "Server started\nListening on: $addr:$port\nMaster socket: " . $this->master . "\n";
+$client = null;
+while( true) {
+usleep( 10000);
+echo ' .';
+$client = @socket_accept( $this->master);
+if ( $client <= 0) continue;
+echo " fork!";
+// new client, fork!
+$pid = pcntl_fork();
+if ( $pid == -1) continue; 	// fork failed
+if ( $pid == 0) break;	// client sockets served outside the while
+}
+// serve the client
+$socket = $client;
+socket_set_nonblock( $socket);
+$user = new $this->userClass( uniqid(), $socket);
+$this->connecting( $user); // notify class extension that a new client has entered
+// do the handshake
+$limit = 10; $status = -1; $msg = '';
+while (  $limit--) {
+$status = @socket_recv( $socket, $msg, $this->maxBufferSize, 0); // todo: if($numBytes === false) { error handling } elseif ($numBytes === 0) { remote client disconected }
+if ( $status > 0) break;
+usleep( 10000);
+}
+if ( ! $statuw) die( " Failed to get handshake from the other side!\n");
+$this->doHandshake( $user, $msg); // sends reply to the handshake
+$user->lastime = tsystem();	// for timeout
+while( tsystem() - $user->lastime < $this->timeout) {	// 5min timeout on inactivity
+if ( $this->tx( $user)) $user->lastime = tsystem();
+$status = @socket_recv( $socket, $msg, $this->maxBufferSize, 0);
+if ( $status <= 0) continue;
+$msg = $this->deframe( $msg, $user);
+$this->rx( $user, mb_convert_encoding( $msg, 'UTF-8'));
+$user->lastime = tsystem();
+}
+// disconnect client socket
+@socket_close( $socket);
+$this->closed( $user); unset( $user);
+die( " Done\n");
+}
+abstract protected function rx( $user, $message); // Calked immediately when the data is recieved.
+abstract protected function tx( $user); // Calked immediately when the data is recieved.
+abstract protected function connected( $user);        // Called after the handshake response is sent to the client.
+abstract protected function closed($user);           // Called after the connection is closed.
+protected function connecting( $user) {
+// Override to handle a connecting user, after the instance of the User is created, but before
+// the handshake has completed.
+}
+protected function send( $user, $message, $type = 'text') {
+//$this->stdout("> $message");
+$message = $this->frame( $message, $user, $type);
+while ( strlen( $message)) {
+$bytes = @socket_write( $user->socket, $message, strlen( $message));
+$message = substr( $message, $bytes);
+}
+
+}
+protected function disconnect( $socket,$triggerClosed=true) {
+$foundUser = null;
+$foundSocket = null;
+$disconnectedUser = false;
+foreach ($this->users as $key => $user) {
+if ($user->socket == $socket) {
+$foundUser = $key;
+$disconnectedUser = $user;
+break;
+}
+}
+if ($foundUser !== null) {
+unset($this->users[$foundUser]);
+$this->users = array_values($this->users);
+}
+foreach ($this->sockets as $key => $sock) {
+if ($sock == $socket) {
+$foundSocket = $key;
+break;
+}
+}
+if ($foundSocket !== null) {
+unset($this->sockets[$foundSocket]);
+$this->sockets = array_values($this->sockets);
+}
+if ($triggerClosed && $disconnectedUser) $this->closed($disconnectedUser);
+}
+protected function doHandshake($user, $buffer) {
+$magicGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+$headers = array();
+$lines = explode("\n",$buffer);
+foreach ($lines as $line) {
+if (strpos($line,":") !== false) {
+$header = explode(":",$line,2);
+$headers[strtolower(trim($header[0]))] = trim($header[1]);
+} else if (stripos($line,"get ") !== false) {
+preg_match("/GET (.*) HTTP/i", $buffer, $reqResource);
+$headers['get'] = trim($reqResource[1]);
+}
+}
+if (isset($headers['get'])) {
+$user->requestedResource = $headers['get'];
+} else {
+// todo: fail the connection
+$handshakeResponse = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
+}
+if (!isset($headers['host']) || !$this->checkHost($headers['host'])) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+if (!isset($headers['upgrade']) || strtolower($headers['upgrade']) != 'websocket') {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+if (!isset($headers['connection']) || strpos(strtolower($headers['connection']), 'upgrade') === FALSE) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+if (!isset($headers['sec-websocket-key'])) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+} else {
+
+}
+if (!isset($headers['sec-websocket-version']) || strtolower($headers['sec-websocket-version']) != 13) {
+$handshakeResponse = "HTTP/1.1 426 Upgrade Required\r\nSec-WebSocketVersion: 13";
+}
+if (($this->headerOriginRequired && !isset($headers['origin']) ) || ($this->headerOriginRequired && !$this->checkOrigin($headers['origin']))) {
+$handshakeResponse = "HTTP/1.1 403 Forbidden";
+}
+if (($this->headerSecWebSocketProtocolRequired && !isset($headers['sec-websocket-protocol'])) || ($this->headerSecWebSocketProtocolRequired && !$this->checkWebsocProtocol($header['sec-websocket-protocol']))) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+if (($this->headerSecWebSocketExtensionsRequired && !isset($headers['sec-websocket-extensions'])) || ($this->headerSecWebSocketExtensionsRequired && !$this->checkWebsocExtensions($header['sec-websocket-extensions']))) {
+$handshakeResponse = "HTTP/1.1 400 Bad Request";
+}
+
+// Done verifying the _required_ headers and optionally required headers.
+
+if (isset($handshakeResponse)) {
+socket_write($user->socket,$handshakeResponse,strlen($handshakeResponse));
+$this->disconnect($user->socket);
+return false;
+}
+
+$user->headers = $headers;
+$user->handshake = $buffer;
+
+$webSocketKeyHash = sha1($headers['sec-websocket-key'] . $magicGUID);
+
+$rawToken = "";
+for ($i = 0; $i < 20; $i++) {
+$rawToken .= chr(hexdec(substr($webSocketKeyHash,$i*2, 2)));
+}
+$handshakeToken = base64_encode($rawToken) . "\r\n";
+
+$subProtocol = (isset($headers['sec-websocket-protocol'])) ? $this->processProtocol($headers['sec-websocket-protocol']) : "";
+$extensions = (isset($headers['sec-websocket-extensions'])) ? $this->processExtensions($headers['sec-websocket-extensions']) : "";
+
+$handshakeResponse = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: $handshakeToken$subProtocol$extensions\r\n";
+socket_write($user->socket,$handshakeResponse,strlen($handshakeResponse));
+$this->connected($user);
+}
+protected function checkHost($hostName) {
+return true; // Override and return false if the host is not one that you would expect.
+// Ex: You only want to accept hosts from the my-domain.com domain,
+// but you receive a host from malicious-site.com instead.
+}
+protected function checkOrigin($origin) {
+return true; // Override and return false if the origin is not one that you would expect.
+}
+protected function checkWebsocProtocol($protocol) {
+return true; // Override and return false if a protocol is not found that you would expect.
+}
+protected function checkWebsocExtensions($extensions) {
+return true; // Override and return false if an extension is not found that you would expect.
+}
+protected function processProtocol($protocol) {
+return ""; // return either "Sec-WebSocket-Protocol: SelectedProtocolFromClientList\r\n" or return an empty string.
+// The carriage return/newline combo must appear at the end of a non-empty string, and must not
+// appear at the beginning of the string nor in an otherwise empty string, or it will be considered part of
+// the response body, which will trigger an error in the client as it will not be formatted correctly.
+}
+protected function processExtensions($extensions) {
+return ""; // return either "Sec-WebSocket-Extensions: SelectedExtensions\r\n" or return an empty string.
+}
+protected function getUserBySocket($socket) {
+foreach ($this->users as $user) {
+if ($user->socket == $socket) {
+return $user;
+}
+}
+return null;
+}
+protected function stdout($message) {
+if ($this->interactive) {
+echo "$message\n";
+}
+}
+protected function stderr($message) {
+if ($this->interactive) {
+echo "$message\n";
+}
+}
+protected function frame($message, $user, $messageType='text', $messageContinues=false) {
+switch ($messageType) {
+case 'continuous':
+$b1 = 0;
+break;
+case 'text':
+$b1 = ($user->sendingContinuous) ? 0 : 1;
+break;
+case 'binary':
+$b1 = ($user->sendingContinuous) ? 0 : 2;
+break;
+case 'close':
+$b1 = 8;
+break;
+case 'ping':
+$b1 = 9;
+break;
+case 'pong':
+$b1 = 10;
+break;
+}
+if ($messageContinues) {
+$user->sendingContinuous = true;
+} else {
+$b1 += 128;
+$user->sendingContinuous = false;
+}
+
+$length = strlen($message);
+$lengthField = "";
+if ($length < 126) {
+$b2 = $length;
+} elseif ($length <= 65536) {
+$b2 = 126;
+$hexLength = dechex($length);
+//$this->stdout("Hex Length: $hexLength");
+if (strlen($hexLength)%2 == 1) {
+$hexLength = '0' . $hexLength;
+}
+$n = strlen($hexLength) - 2;
+
+for ($i = $n; $i >= 0; $i=$i-2) {
+$lengthField = chr(hexdec(substr($hexLength, $i, 2))) . $lengthField;
+}
+while (strlen($lengthField) < 2) {
+$lengthField = chr(0) . $lengthField;
+}
+} else {
+$b2 = 127;
+$hexLength = dechex($length);
+if (strlen($hexLength)%2 == 1) {
+$hexLength = '0' . $hexLength;
+}
+$n = strlen($hexLength) - 2;
+
+for ($i = $n; $i >= 0; $i=$i-2) {
+$lengthField = chr(hexdec(substr($hexLength, $i, 2))) . $lengthField;
+}
+while (strlen($lengthField) < 8) {
+$lengthField = chr(0) . $lengthField;
+}
+}
+
+return chr($b1) . chr($b2) . $lengthField . $message;
+}
+protected function deframe($message, $user) {
+//echo $this->strtohex($message);
+$headers = $this->extractHeaders($message);
+$pongReply = false;
+$willClose = false;
+switch($headers['opcode']) {
+case 0:
+case 1:
+case 2:
+break;
+case 8:
+// todo: close the connection
+$user->hasSentClose = true;
+return "";
+case 9:
+$pongReply = true;
+case 10:
+break;
+default:
+//$this->disconnect($user); // todo: fail connection
+$willClose = true;
+break;
+}
+
+if ($user->handlingPartialPacket) {
+$message = $user->partialBuffer . $message;
+$user->handlingPartialPacket = false;
+return $this->deframe($message, $user);
+}
+
+if ($this->checkRSVBits($headers,$user)) {
+return false;
+}
+
+if ($willClose) {
+// todo: fail the connection
+return false;
+}
+
+$payload = $user->partialMessage . $this->extractPayload($message,$headers);
+
+if ($pongReply) {
+$reply = $this->frame($payload,$user,'pong');
+socket_write($user->socket,$reply,strlen($reply));
+return false;
+}
+if (extension_loaded('mbstring')) {
+if ($headers['length'] > mb_strlen($payload)) {
+$user->handlingPartialPacket = true;
+$user->partialBuffer = $message;
+return false;
+}
+} else {
+if ($headers['length'] > strlen($payload)) {
+$user->handlingPartialPacket = true;
+$user->partialBuffer = $message;
+return false;
+}
+}
+
+$payload = $this->applyMask($headers,$payload);
+
+if ($headers['fin']) {
+$user->partialMessage = "";
+return $payload;
+}
+$user->partialMessage = $payload;
+return false;
+}
+protected function extractHeaders($message) {
+$header = array('fin'     => $message[0] & chr(128),
+'rsv1'    => $message[0] & chr(64),
+'rsv2'    => $message[0] & chr(32),
+'rsv3'    => $message[0] & chr(16),
+'opcode'  => ord($message[0]) & 15,
+'hasmask' => $message[1] & chr(128),
+'length'  => 0,
+'mask'    => "");
+$header['length'] = (ord($message[1]) >= 128) ? ord($message[1]) - 128 : ord($message[1]);
+
+if ($header['length'] == 126) {
+if ($header['hasmask']) {
+$header['mask'] = $message[4] . $message[5] . $message[6] . $message[7];
+}
+$header['length'] = ord($message[2]) * 256
++ ord($message[3]);
+} elseif ($header['length'] == 127) {
+if ($header['hasmask']) {
+$header['mask'] = $message[10] . $message[11] . $message[12] . $message[13];
+}
+$header['length'] = ord($message[2]) * 65536 * 65536 * 65536 * 256
++ ord($message[3]) * 65536 * 65536 * 65536
++ ord($message[4]) * 65536 * 65536 * 256
++ ord($message[5]) * 65536 * 65536
++ ord($message[6]) * 65536 * 256
++ ord($message[7]) * 65536
++ ord($message[8]) * 256
++ ord($message[9]);
+} elseif ($header['hasmask']) {
+$header['mask'] = $message[2] . $message[3] . $message[4] . $message[5];
+}
+//echo $this->strtohex($message);
+//$this->printHeaders($header);
+return $header;
+}
+protected function extractPayload($message,$headers) {
+$offset = 2;
+if ($headers['hasmask']) {
+$offset += 4;
+}
+if ($headers['length'] > 65535) {
+$offset += 8;
+} elseif ($headers['length'] > 125) {
+$offset += 2;
+}
+return substr($message,$offset);
+}
+protected function applyMask($headers,$payload) {
+$effectiveMask = "";
+if ($headers['hasmask']) {
+$mask = $headers['mask'];
+} else {
+return $payload;
+}
+
+while (strlen($effectiveMask) < strlen($payload)) {
+$effectiveMask .= $mask;
+}
+while (strlen($effectiveMask) > strlen($payload)) {
+$effectiveMask = substr($effectiveMask,0,-1);
+}
+return $effectiveMask ^ $payload;
+}
+protected function checkRSVBits($headers,$user) { // override this method if you are using an extension where the RSV bits are used.
+if (ord($headers['rsv1']) + ord($headers['rsv2']) + ord($headers['rsv3']) > 0) {
+//$this->disconnect($user); // todo: fail connection
+return true;
+}
+return false;
+}
+protected function strtohex($str) {
+$strout = "";
+for ($i = 0; $i < strlen($str); $i++) {
+$strout .= (ord($str[$i])<16) ? "0" . dechex(ord($str[$i])) : dechex(ord($str[$i]));
+$strout .= " ";
+if ($i%32 == 7) {
+$strout .= ": ";
+}
+if ($i%32 == 15) {
+$strout .= ": ";
+}
+if ($i%32 == 23) {
+$strout .= ": ";
+}
+if ($i%32 == 31) {
+$strout .= "\n";
+}
+}
+return $strout . "\n";
+}
+protected function printHeaders($headers) {
+echo "Array\n(\n";
+foreach ($headers as $key => $value) {
+if ($key == 'length' || $key == 'opcode') {
+echo "\t[$key] => $value\n\n";
+} else {
+echo "\t[$key] => ".$this->strtohex($value)."\n";
+
+}
+
+}
+echo ")\n";
+}
+
+}
+
+
+function makenv() {	// in web mode, htdocs should be in /web
+	global $_SERVER, $prefix, $_SESSION;
+	$cdir = getcwd(); @chdir( $prefix); $prefix = getcwd(); chdir( $cdir);
+	//$s = explode( '/', $prefix); array_pop( $s); $prefix = implode( '/', $s); // remove / at the end of prefix
+	$out = array();
+	$addr = '';
+	if ( isset( $_SERVER[ 'SERVER_NAME'])) $addr = $_SERVER[ 'SERVER_NAME'];
+	if ( isset( $_SERVER[ 'DOCUMENT_ROOT'])) $root = $_SERVER[ 'DOCUMENT_ROOT'];
+	if ( ! $addr && is_file( '/sbin/ifconfig')) { 	// probably command line, try to get own IP address from ipconfig
+		$in = popen( '/sbin/ifconfig', 'r');
+		$L = array(); while ( $in && ! feof( $in)) {
+			$line = trim( fgets( $in)); if ( ! $line) continue;
+			if ( strpos( $line, 'inet addr') !== 0) continue;
+			$L2 = explode( 'inet addr:', $line);
+			$L3 = array_pop( $L2);
+			$L4 = explode( ' ', $L3);
+			$L5 = trim( array_shift( $L4));
+			array_push( $L, $L5);
+		}
+		pclose( $in); $addr = implode( ',', $L);
+	}
+	if ( ! $root) $root = '/web';
+	// find $root depending on web space versus CLI environment
+	$split = explode( "$root/", $cdir); $aname = '';
+	if ( count( $split) == 2) $aname = @array_shift( explode( '/', $split[ 1]));
+	else $aname = '';
+	//else { $aname = ''; $root = $prefix ? $prefix : $cdir; } // CLI
+	// application session
+	$session = array();
+	if ( $aname && isset( $_SESSION) && isset( $_SESSION[ $aname])) { // check session, detect ssid changes
+		$session = $_SESSION[ $aname];
+		$ssid = session_id();
+		if ( ! isset( $session[ 'ssid'])) $session[ 'ssid'] = $ssid;
+		if ( $session[ 'ssid'] != $ssid) { $session[ 'oldssid'] = $session[ 'ssid']; $session[ 'ssid'] = $ssid; }
+	}
+	// return result
+	$L2 = explode( ',', $addr);
+	$out = array(
+		'SYSTYPE' => ( isset( $_SERVER) && isset( $_SERVER[ 'SYSTEMDRIVE'])) ? 'cygwin' : 'linux',
+		'CDIR' => $cdir,
+		'BIP' => $addr ? array_shift( $L2) : '',
+		'BIPS' => $addr ? explode( ',', $addr) : array(),
+		'SBDIR' => $root,	// server base dir, htdocs for web, ajaxkit root for CLI
+		'ABDIR' => $prefix,	// ajaxkit base directory
+		'BDIR' => "$root" . ( $aname ? '/' . $aname : ''), // base app dir
+		'BURL' => ( $addr ? 'http://' . $addr . ( $aname ? "/$aname" : '') : ''),
+		'ABURL' => '', 	// add later
+		'ANAME' => $aname ? $aname: 'root',
+		'SNAME' => ( isset( $_SERVER) && isset( $_SERVER[ 'SCRIPT_NAME'])) ? $_SERVER[ 'SCRIPT_NAME'] : '?', 
+		'DBNAME' => $aname,
+		// application session
+		'ASESSION' => $session,
+		// client (browser) specific
+		'RIP' => isset( $_SERVER[ 'REMOTE_ADDR']) ? $_SERVER[ 'REMOTE_ADDR'] : '',
+		'RPORT' => isset( $_SERVER[ 'REMOTE_PORT']) ? $_SERVER[ 'REMOTE_PORT'] : '',
+		'RAGENT' => isset( $_SERVER[ 'HTTP_USER_AGENT']) ? $_SERVER[ 'HTTP_USER_AGENT'] : ''
+	);
+	$out[ 'ABURL'] = ( $addr ? "http://$addr" . str_replace( "$root", '', $out[ 'ABDIR']) : '');
+	return $out;
+}
+function jqload( $justdumpjs = false, $mode = 'full') {
+	global $BURL, $ABURL, $ABDIR, $JQ, $JQMODE;
+	$files = array(); 
+	foreach ( $JQ[ 'libs'] as $file) lpush( $files, "jquery.$file" . ( strpos( $JQMODE, 'source') !== false ? '.min.js' : '.js'));
+	if ( $mode == 'full' || $mode == 'short') foreach ( $JQ[ 'basics'] as $file) lpush( $files, $file . ( strpos( $JQMODE, 'source') !== false ? '.min.js' : '.js'));
+	if ( $mode == 'full') foreach ( $JQ[ 'advanced'] as $file) lpush( $files, $file . ( strpos( $JQMODE, 'source') !== false ? '.min.js' : '.js'));
+	if ( $JQMODE == 'debug') {	// separate script tag per file
+		foreach ( $files as $file) echo $justdumpjs ? implode( '', file( "$ABDIR/jq/$file")) . "\n" : '<script src="' . $ABURL . "/jq/$file" . '?' . mr( 5) . '"></script>' . "\n";
+	}
+	if ( $JQMODE == 'source') {	// script type per file with source instead of url pointer
+		foreach ( $files as $file) echo ( $justdumpjs ? '' :  "<script>\n") . implode( '', file( "$ABDIR/jq/$file")) . "\n" . ( $justdumpjs ? '' : "</script>\n");
+	}
+	if ( $JQMODE == 'sourceone') {	// all source inside one tag (no tag if $justdumpjs is true
+		if ( ! $justdumpjs) echo "<script>\n\n";
+		foreach ( $files as $file) echo implode( '', file( "$ABDIR/jq/$file")) . "\n\n";
+		echo "if ( callback) eval( callback)();\n";
+		if ( ! $justdumpjs) echo "</script>\n";
+	}
+	// to fix canvas in IE
+	if ( ! $justdumpjs) echo '<!--[if IE]><script type="text/javascript" src="' . $ABURL . '/jq/jquery.excanvas.js"></script><![endif]-->' . "\n";
+}
+function jqparse( $path, $all = false) {	// minimizes JS and echoes the rest
+	$in = fopen( $path, 'r');
+	$put = false;
+	if ( $all) $put = $all;
+	while ( ! feof( $in)) {
+		$line = trim( fgets( $in));
+		if ( ! $put && strpos( $line, '(function($') !== false) { $put = true; continue; }
+		if ( ! $all && strpos( $line, 'jQuery)') !== false) break;	// end of file
+		if ( ! strlen( $line) || strpos( $line, '//') === 0) continue;
+		if ( strpos( $line, '/*') === 0) {	// multiline comment */
+			$limit = 100000;
+			while ( $limit--) { 
+				// /*
+				if ( strpos( $line,  '*/') !== FALSE) break;
+				$line = trim( fgets( $in));
+			}
+			continue;
+		}
+		if ( $put) echo $line . "\n";
+	}
+	fclose( $in);
+}
+function flog( $msg, $echo = true, $timestamp = false, $uselock = false, $path = '') {	// writes the message to file log, no end of line
+	global $BDIR, $FLOG;
+	if ( is_array( $msg)) $msg = htt( $msg);
+	if ( ! $FLOG) $FLOG = $path;
+	if ( ! $FLOG) $FLOG = "$BDIR/log.txt"; 
+	$out = fopen( $FLOG, 'a');
+	if ( $timestamp) fwrite( $out, "time=" . tsystemstamp() . ',');
+	fwrite( $out, "$msg\n");
+	fclose( $out);
+	if ( $echo) echo "$msg\n";
+}
+function checksession( $usedb = false) { // db calls dbsession()
+	global $ASESSION, $DB;
+	if ( ! isset( $ASESSION[ 'oldssid'])) return;	// nothing wrong
+	$oldssid = $ASESSION[ 'oldssid'];
+	$ssid = $ASESSION[ 'ssid'];
+	if ( $usedb) dbsession( 'reset', "newssid=$ssid", $oldssid);
+	unset( $ASESSION[ 'oldssid']);
+}
+// will save in BURL/log.base64( uid)    as base64( bzip2( json))  -- no clear from extension, but should remember the format
+// $msg can be either string ( will tth())  or hash
+// will add     (1) time   (2) uid   (3) took (current time - REQTIME)   (4) reply=JO (if not empty/NULL)
+function mylog( $msg, $ouid = null, $noreply = false, $ofile = null) {
+	global $uid, $BDIR, $JO, $REQTIME, $_SERVER, $ASLOCKSTATS;
+	if ( $ouid === null) $ouid = $uid; 
+	if ( $ouid === null) $ouid = 'nobody';
+	$h = array();
+	$h[ 'time'] = tsystemstamp();
+	$h[ 'uid'] = $ouid;
+	$h[ 'took'] = tsystem() - $REQTIME;
+	$h[ 'script'] = lpop( ttl( $_SERVER[ 'SCRIPT_FILENAME'], '/'));
+	$h = hm( $h, is_string( $msg) ? tth( $msg) : $msg);	// merge, but keep time and uid in proper order
+	if ( $JO && ! $noreply) $h[ 'reply'] = $JO;
+	if ( $ASLOCKSTATS) $h[ 'aslockstats'] = $ASLOCKSTATS;
+	$file = sprintf( "%s/log.%s", $BDIR, base64_encode( $ouid)); if ( $ofile) $file = $ofile;
+	$out = fopen( $file, 'a'); fwrite( $out, h2json( $h, true, null, null, true) . "\n"); fclose( $out);
+}
+
 
 ?>
